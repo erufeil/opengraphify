@@ -1,0 +1,20 @@
+[backend]
+# Local inference via Ollama (default). To use OpenRouter, set:
+#   provider = "openrouter"
+#   base_url = "https://openrouter.ai/api/v1"
+#   model    = "mistralai/mistral-7b-instruct"
+#   api_key  = "sk-or-..."   # or set OPENGRAPHIFY_API_KEY env var
+provider = "ollama"
+model    = "qwen2.5-coder:7b"
+base_url = "http://localhost:11434/v1"
+api_key  = ""
+
+[schedule]
+# Interval used in --watch daemon mode
+interval_minutes = 15
+
+[output]
+# Must match graphify's out_dir so they share manifest.json and graph.json
+out_dir         = "graphify-out"
+generate_html   = true
+generate_report = true

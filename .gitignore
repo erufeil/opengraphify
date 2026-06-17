@@ -216,3 +216,9 @@ __marimo__/
 
 # Streamlit
 .streamlit/secrets.toml
+
+# graphify source (dependencia externa — se instala desde %USERPROFILE%\.opengraphify\graphify\)
+/graphify/
+
+# graph output generado por opengraphify en repos de trabajo
+graphify-out/
