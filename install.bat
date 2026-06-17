@@ -47,14 +47,25 @@ REM -----------------------------------------------
 REM 1. Clonar e instalar graphify
 REM -----------------------------------------------
 echo [1/5] graphify...
+REM Si la carpeta existe pero le falta pyproject.toml es un clon roto: borrar
 if exist "%DEPS_DIR%\graphify" (
+    if not exist "%DEPS_DIR%\graphify\pyproject.toml" (
+        echo      Clon anterior incompleto, eliminando...
+        powershell -NoProfile -Command "Remove-Item -Recurse -Force '%DEPS_DIR%\graphify'"
+    )
+)
+if exist "%DEPS_DIR%\graphify\pyproject.toml" (
     echo      Carpeta ya existe, saltando clon.
     echo      Para actualizar a la ultima version: actualiza-librerias.bat
 ) else (
     echo      Clonando desde GitHub...
-    git clone --filter=blob:none --depth 1 https://github.com/safishamsi/graphify.git "%DEPS_DIR%\graphify"
+    git clone --depth 1 https://github.com/safishamsi/graphify.git "%DEPS_DIR%\graphify"
     if errorlevel 1 (
         echo ERROR: no se pudo clonar graphify. Verificar conexion a internet.
+        pause & exit /b 1
+    )
+    if not exist "%DEPS_DIR%\graphify\pyproject.toml" (
+        echo ERROR: el clon de graphify no contiene pyproject.toml.
         pause & exit /b 1
     )
     echo      Clonado OK.
@@ -85,7 +96,7 @@ REM Si la carpeta existe pero le falta pyproject.toml es un clon viejo roto: bor
 if exist "%DEPS_DIR%\opengraphify" (
     if not exist "%DEPS_DIR%\opengraphify\pyproject.toml" (
         echo      Clon anterior incompleto, eliminando...
-        rmdir /s /q "%DEPS_DIR%\opengraphify"
+        powershell -NoProfile -Command "Remove-Item -Recurse -Force '%DEPS_DIR%\opengraphify'"
     )
 )
 
@@ -93,7 +104,7 @@ if exist "%DEPS_DIR%\opengraphify\pyproject.toml" (
     echo      Ya instalado. Para actualizar: actualiza-librerias.bat
 ) else (
     echo      Clonando desde GitHub...
-    git clone --filter=blob:none --depth 1 https://github.com/erufeil/opengraphify.git "%DEPS_DIR%\opengraphify"
+    git clone --depth 1 https://github.com/erufeil/opengraphify.git "%DEPS_DIR%\opengraphify"
     if errorlevel 1 (
         echo ERROR: no se pudo clonar opengraphify.
         pause & exit /b 1
@@ -118,24 +129,18 @@ REM    para que "opengraphify" funcione sin "python -m"
 REM -----------------------------------------------
 echo.
 echo [4/5] Configurando PATH...
-for /f "delims=" %%S in ('python -c "import sysconfig; print(sysconfig.get_path(\"scripts\"))"') do set SCRIPTS_DIR=%%S
-echo      Scripts en: %SCRIPTS_DIR%
+REM pip puede instalar el .exe en el Scripts del sistema o en el del usuario
+REM (segun si Python esta en Program Files). Detectamos ambos y agregamos los dos.
+for /f "delims=" %%S in ('python -c "import sysconfig; print(sysconfig.get_path(\"scripts\"))"') do set SYS_SCRIPTS=%%S
+for /f "delims=" %%S in ('python -c "import sysconfig; print(sysconfig.get_path(\"scripts\",\"nt_user\"))"') do set USER_SCRIPTS=%%S
+echo      Scripts sistema: %SYS_SCRIPTS%
+echo      Scripts usuario: %USER_SCRIPTS%
 
-REM Activar en esta sesion
-set PATH=%PATH%;%SCRIPTS_DIR%
+REM Activar ambos en esta sesion
+set PATH=%PATH%;%SYS_SCRIPTS%;%USER_SCRIPTS%
 
-REM Verificar si ya esta en el PATH permanente del usuario
-powershell -NoProfile -Command "exit ([Environment]::GetEnvironmentVariable('Path','User') -like '*%SCRIPTS_DIR%*')" >nul 2>&1
-if errorlevel 1 (
-    echo      Agregando al PATH permanente del usuario...
-    powershell -NoProfile -Command ^
-        "$old = [Environment]::GetEnvironmentVariable('Path','User'); ^
-         $new = $old + ';%SCRIPTS_DIR%'; ^
-         [Environment]::SetEnvironmentVariable('Path', $new, 'User')"
-    echo      Agregado. Funciona en terminales NUEVAS.
-) else (
-    echo      Ya estaba en PATH.
-)
+REM Agregar al PATH permanente del usuario los directorios que falten
+powershell -NoProfile -Command "$user = [Environment]::GetEnvironmentVariable('Path','User'); $changed=$false; foreach ($d in @('%SYS_SCRIPTS%','%USER_SCRIPTS%')) { if ($d -and ($user -notlike ('*'+$d+'*'))) { $user=($user.TrimEnd(';')+';'+$d); $changed=$true; Write-Host ('      + ' + $d) } }; if ($changed) { [Environment]::SetEnvironmentVariable('Path',$user,'User'); Write-Host '      PATH actualizado. Funciona en terminales NUEVAS.' } else { Write-Host '      Ya estaba en PATH.' }"
 
 REM -----------------------------------------------
 REM 5. Verificar instalacion
@@ -164,7 +169,8 @@ echo  Instalacion completada!
 echo.
 echo  graphify    : %DEPS_DIR%\graphify
 echo  opengraphify: %DEPS_DIR%\opengraphify
-echo  Scripts     : %SCRIPTS_DIR%
+echo  Scripts     : %SYS_SCRIPTS%
+echo                %USER_SCRIPTS%
 echo.
 echo  PROXIMOS PASOS:
 echo.

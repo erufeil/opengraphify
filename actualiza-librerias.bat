@@ -25,10 +25,10 @@ REM -----------------------------------------------
 echo [1/2] Actualizando graphify...
 if exist "%DEPS_DIR%\graphify" (
     echo      Eliminando version anterior...
-    rmdir /s /q "%DEPS_DIR%\graphify"
+    powershell -NoProfile -Command "Remove-Item -Recurse -Force '%DEPS_DIR%\graphify'"
 )
 echo      Clonando ultima version...
-git clone --filter=blob:none --depth 1 https://github.com/safishamsi/graphify.git "%DEPS_DIR%\graphify"
+git clone --depth 1 https://github.com/safishamsi/graphify.git "%DEPS_DIR%\graphify"
 if errorlevel 1 (
     echo ERROR: no se pudo clonar graphify.
     pause & exit /b 1
@@ -48,10 +48,10 @@ echo.
 echo [2/2] Actualizando opengraphify...
 if exist "%DEPS_DIR%\opengraphify" (
     echo      Eliminando version anterior...
-    rmdir /s /q "%DEPS_DIR%\opengraphify"
+    powershell -NoProfile -Command "Remove-Item -Recurse -Force '%DEPS_DIR%\opengraphify'"
 )
 echo      Clonando ultima version...
-git clone --filter=blob:none --depth 1 https://github.com/erufeil/opengraphify.git "%DEPS_DIR%\opengraphify"
+git clone --depth 1 https://github.com/erufeil/opengraphify.git "%DEPS_DIR%\opengraphify"
 if errorlevel 1 (
     echo ERROR: no se pudo clonar opengraphify.
     pause & exit /b 1
