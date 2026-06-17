@@ -145,6 +145,25 @@ api_key  = "sk-or-..."
 
 ---
 
+## Activar en un repo nuevo
+
+Parado en la carpeta del repo, ejecutar una sola vez:
+
+```bash
+graphify install --project
+```
+
+Esto escribe la sección `## graphify` en `CLAUDE.md` e instala el hook `PreToolUse`
+en `.claude/settings.json`. Claude Code queda conectado al grafo de ese repo.
+
+Luego construir el grafo inicial (sin gastar tokens de Claude):
+
+```bash
+opengraphify . --force
+```
+
+---
+
 ## Uso
 
 ### Una corrida manual (desde cualquier repo)
@@ -196,6 +215,16 @@ Agregar al `.gitignore` del repo de trabajo:
 
 ```text
 graphify-out/
+```
+
+### Flujo completo para un repo nuevo
+
+```bash
+cd C:\mi-proyecto
+
+graphify install --project   # activa graphify: CLAUDE.md + hooks
+opengraphify . --force        # construye el grafo inicial (sin tokens de Claude)
+opengraphify . --watch        # mantiene el grafo actualizado en background
 ```
 
 ---
