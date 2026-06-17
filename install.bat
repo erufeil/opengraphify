@@ -80,9 +80,17 @@ REM 3. Clonar e instalar opengraphify
 REM -----------------------------------------------
 echo.
 echo [3/5] opengraphify...
+
+REM Si la carpeta existe pero le falta pyproject.toml es un clon viejo roto: borrar
 if exist "%DEPS_DIR%\opengraphify" (
-    echo      Carpeta ya existe, saltando clon.
-    echo      Para actualizar: actualiza-librerias.bat
+    if not exist "%DEPS_DIR%\opengraphify\pyproject.toml" (
+        echo      Clon anterior incompleto, eliminando...
+        rmdir /s /q "%DEPS_DIR%\opengraphify"
+    )
+)
+
+if exist "%DEPS_DIR%\opengraphify\pyproject.toml" (
+    echo      Ya instalado. Para actualizar: actualiza-librerias.bat
 ) else (
     echo      Clonando desde GitHub...
     git clone --filter=blob:none --depth 1 https://github.com/erufeil/opengraphify.git "%DEPS_DIR%\opengraphify"
@@ -90,9 +98,13 @@ if exist "%DEPS_DIR%\opengraphify" (
         echo ERROR: no se pudo clonar opengraphify.
         pause & exit /b 1
     )
+    if not exist "%DEPS_DIR%\opengraphify\pyproject.toml" (
+        echo ERROR: el clon no contiene pyproject.toml. Verificar el repo de GitHub.
+        pause & exit /b 1
+    )
     echo      Clonado OK.
 )
-echo      Instalando como paquete pip...
+echo      Instalando...
 python -m pip install -e "%DEPS_DIR%\opengraphify" --quiet
 if errorlevel 1 (
     echo ERROR: instalacion de opengraphify fallo.
