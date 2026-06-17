@@ -35,28 +35,24 @@ echo.
 
 REM -----------------------------------------------
 REM 1. graphify
-REM    Primero verifica si ya esta instalado como paquete pip.
-REM    Si esta, lo saltea (no duplica ni pisa la instalacion existente).
-REM    Si no esta, clona a la carpeta central y lo instala.
+REM    Usa la carpeta central como fuente unica.
+REM    Si la carpeta ya existe: ya fue instalado por este bat, saltar.
+REM    Si no existe: clonar e instalar, pisando cualquier version vieja.
+REM    Esto garantiza compatibilidad: opengraphify siempre usa la version
+REM    correcta de graphify, independientemente de lo que haya instalado antes.
 REM -----------------------------------------------
 echo [1/4] graphify...
-pip show graphify >nul 2>&1
-if not errorlevel 1 (
-    REM Ya instalado — mostrar desde donde
-    for /f "tokens=1,* delims=: " %%A in ('pip show graphify ^| findstr /i "Location"') do (
-        echo      Ya instalado. Ubicacion: %%B
-    )
-    echo      Saltando. Para reinstalar en %DEPS_DIR%\graphify: borrar esa carpeta y volver a correr.
+if exist "%DEPS_DIR%\graphify" (
+    echo      Ya instalado desde %DEPS_DIR%\graphify
+    echo      Para actualizar a la ultima version: actualiza-librerias.bat
 ) else (
-    echo      No esta instalado. Clonando...
-    if not exist "%DEPS_DIR%\graphify" (
-        git clone --filter=blob:none --depth 1 https://github.com/safishamsi/graphify.git "%DEPS_DIR%\graphify"
-        if errorlevel 1 (
-            echo ERROR: no se pudo clonar graphify. Verificar conexion a internet.
-            pause & exit /b 1
-        )
+    echo      Clonando...
+    git clone --filter=blob:none --depth 1 https://github.com/safishamsi/graphify.git "%DEPS_DIR%\graphify"
+    if errorlevel 1 (
+        echo ERROR: no se pudo clonar graphify. Verificar conexion a internet.
+        pause & exit /b 1
     )
-    echo      Instalando...
+    echo      Instalando ^(pisa cualquier version previa^)...
     pip install -e "%DEPS_DIR%\graphify" --quiet
     if errorlevel 1 (
         echo ERROR: pip install graphify fallo.
@@ -66,55 +62,36 @@ if not errorlevel 1 (
 )
 
 REM -----------------------------------------------
-REM 2. Instalar dependencias extra de graphify para Ollama
-REM    (el extra [ollama] agrega el cliente openai que graphify necesita)
+REM 2. Dependencia: openai SDK (necesaria para que graphify hable con Ollama)
 REM -----------------------------------------------
 echo.
-echo [2/4] Dependencias de graphify para Ollama...
+echo [2/4] Dependencias para Ollama...
 pip install "openai>=1.0" --quiet
 echo      OK.
 
 REM -----------------------------------------------
 REM 3. opengraphify
-REM    Si este bat esta dentro del repo (hay pyproject.toml al lado),
-REM    instala desde ahi. Si no, clona de GitHub.
+REM    Misma logica: carpeta central como fuente unica.
 REM -----------------------------------------------
 echo.
 echo [3/4] opengraphify...
-pip show opengraphify >nul 2>&1
-if not errorlevel 1 (
-    for /f "tokens=1,* delims=: " %%A in ('pip show opengraphify ^| findstr /i "Location"') do (
-        echo      Ya instalado. Ubicacion: %%B
-    )
-    echo      Saltando. Para reinstalar: borrar %DEPS_DIR%\opengraphify y volver a correr.
+if exist "%DEPS_DIR%\opengraphify" (
+    echo      Ya instalado desde %DEPS_DIR%\opengraphify
+    echo      Para actualizar: actualiza-librerias.bat
 ) else (
-    REM Detectar si estamos corriendo desde el repo fuente
-    set OGF_SOURCE=
-    if exist "%~dp0pyproject.toml" (
-        set OGF_SOURCE=%~dp0
-        REM Quitar barra final
-        if "!OGF_SOURCE:~-1!"=="\" set OGF_SOURCE=!OGF_SOURCE:~0,-1!
-        echo      Fuente local detectada: !OGF_SOURCE!
-    ) else (
-        echo      Fuente local no encontrada. Clonando de GitHub...
-        if not exist "%DEPS_DIR%\opengraphify" (
-            git clone --filter=blob:none --depth 1 https://github.com/erufeil/opengraphify.git "%DEPS_DIR%\opengraphify"
-            if errorlevel 1 (
-                echo ERROR: no se pudo clonar opengraphify.
-                echo Asegurate de que el repo tenga el codigo publicado en GitHub,
-                echo o corre este bat desde la carpeta del repo opengraphify.
-                pause & exit /b 1
-            )
-        )
-        set OGF_SOURCE=%DEPS_DIR%\opengraphify
+    echo      Clonando...
+    git clone --filter=blob:none --depth 1 https://github.com/erufeil/opengraphify.git "%DEPS_DIR%\opengraphify"
+    if errorlevel 1 (
+        echo ERROR: no se pudo clonar opengraphify.
+        pause & exit /b 1
     )
-    echo      Instalando desde !OGF_SOURCE!...
-    pip install -e "!OGF_SOURCE!" --quiet
+    echo      Instalando...
+    pip install -e "%DEPS_DIR%\opengraphify" --quiet
     if errorlevel 1 (
         echo ERROR: pip install opengraphify fallo.
         pause & exit /b 1
     )
-    echo      OK ^(fuente: !OGF_SOURCE!^)
+    echo      OK ^(fuente: %DEPS_DIR%\opengraphify^)
 )
 
 REM -----------------------------------------------
@@ -134,6 +111,9 @@ if errorlevel 1 (
 echo.
 echo ==============================================
 echo  Instalacion completada!
+echo.
+echo  graphify    : %DEPS_DIR%\graphify
+echo  opengraphify: %DEPS_DIR%\opengraphify
 echo.
 echo  Proximos pasos:
 echo    1. Instalar Ollama: https://ollama.com
