@@ -98,7 +98,14 @@ def run(root: Path, config: Config, *, force: bool = False) -> bool:
     }
 
     if semantic_files:
-        from graphify.llm import BACKENDS as _BACKENDS, extract_corpus_parallel as _extract_corpus_parallel
+        from graphify.llm import (
+            BACKENDS as _BACKENDS,
+            extract_corpus_parallel as _extract_corpus_parallel,
+        )
+        try:
+            from graphify.llm import _pack_chunks_by_tokens as _pack_chunks
+        except Exception:
+            _pack_chunks = None
         # Patch BACKENDS at runtime so the configured endpoint is used even if
         # the env var was set after graphify.llm was first imported.
         _BACKENDS["ollama"]["base_url"] = config.base_url
@@ -122,23 +129,45 @@ def run(root: Path, config: Config, *, force: bool = False) -> bool:
             print(f"[opengraphify] semantic cache: {cache_hits} hit / {len(uncached_paths)} miss")
 
         if uncached_paths:
+            uncached_pathobjs = [Path(p) for p in uncached_paths]
+            n_total = len(uncached_pathobjs)
             print(
-                f"[opengraphify] semantic extraction on {len(uncached_paths)} files "
-                f"via {backend} ({config.model})..."
+                f"[opengraphify] semantic extraction on {n_total} files "
+                f"via {backend} ({config.model}), token_budget={config.token_budget:,}..."
             )
-            chunk_stats: dict = {"succeeded": 0}
+
+            # Files are LLM-processed in parallel chunks (one request per chunk,
+            # packed by token budget + directory). Pre-compute the same chunk plan
+            # graphify uses so we can report which files each chunk covers; per-file
+            # lines therefore appear in bursts as each chunk completes.
+            _TOKEN_BUDGET = config.token_budget
+            chunks = [uncached_pathobjs]
+            if _pack_chunks is not None:
+                try:
+                    chunks = _pack_chunks(uncached_pathobjs, token_budget=_TOKEN_BUDGET)
+                except Exception:
+                    chunks = [uncached_pathobjs]
+
+            progress = {"done": 0}
 
             def _on_chunk(idx: int, total: int, _r: dict) -> None:
-                chunk_stats["succeeded"] += 1
-                print(f"[opengraphify] chunk {idx + 1}/{total} done", flush=True)
+                chunk_files = chunks[idx] if idx < len(chunks) else []
+                for f in chunk_files:
+                    progress["done"] += 1
+                    print(
+                        f"[opengraphify] semantic extraction on {Path(f).name} "
+                        f"({progress['done']}/{n_total})",
+                        flush=True,
+                    )
 
             try:
                 fresh = _extract_corpus_parallel(
-                    [Path(p) for p in uncached_paths],
+                    uncached_pathobjs,
                     backend=backend,
                     api_key=api_key,
                     model=config.model,
                     root=root,
+                    token_budget=_TOKEN_BUDGET,
                     on_chunk_done=_on_chunk,
                 )
                 try:
@@ -214,6 +243,39 @@ def run(root: Path, config: Config, *, force: bool = False) -> bool:
         surprises = []
 
     # ------------------------------------------------------------------ #
+    # 6b. Community labeling — name each community via the configured LLM.
+    # Without this the HTML meta-graph (built when the node count exceeds the
+    # viz limit) and the report fall back to "Community N" placeholders, so
+    # every aggregated node appears unnamed. Mirrors graphify's standalone CLI.
+    # ------------------------------------------------------------------ #
+    labels_path = graphify_out / ".graphify_labels.json"
+    community_labels: dict = {cid: f"Community {cid}" for cid in communities}
+    try:
+        from graphify.llm import (
+            BACKENDS as _LBL_BACKENDS,
+            generate_community_labels as _gen_labels,
+        )
+        # Point the labeling backend at the configured endpoint/model too.
+        _LBL_BACKENDS["ollama"]["base_url"] = config.base_url
+        _LBL_BACKENDS["ollama"]["default_model"] = config.model
+        community_labels, _lbl_src = _gen_labels(
+            G, communities, backend=config.graphify_backend(), gods=gods
+        )
+        print(
+            f"[opengraphify] community labels: {_lbl_src} "
+            f"({len(community_labels)} communities)"
+        )
+    except Exception as exc:
+        print(f"[opengraphify] WARNING: community labeling failed: {exc}", file=sys.stderr)
+    try:
+        labels_path.write_text(
+            json.dumps({str(k): v for k, v in community_labels.items()}, ensure_ascii=False),
+            encoding="utf-8",
+        )
+    except Exception as exc:
+        print(f"[opengraphify] WARNING: could not write labels: {exc}", file=sys.stderr)
+
+    # ------------------------------------------------------------------ #
     # 7. Export
     # ------------------------------------------------------------------ #
     from graphify.export import backup_if_protected as _backup, to_json as _to_json
@@ -229,19 +291,15 @@ def run(root: Path, config: Config, *, force: bool = False) -> bool:
     if config.generate_html:
         from graphify.export import to_html as _to_html
         try:
-            _to_html(G, communities, str(graphify_out / "graph.html"), node_limit=5000)
+            _to_html(
+                G, communities, str(graphify_out / "graph.html"),
+                community_labels=community_labels or None, node_limit=5000,
+            )
         except Exception as exc:
             print(f"[opengraphify] WARNING: could not generate HTML: {exc}", file=sys.stderr)
 
     if config.generate_report:
         from graphify.report import generate as _gen_report
-        labels_path = graphify_out / ".graphify_labels.json"
-        labels: dict = {}
-        if labels_path.exists():
-            try:
-                labels = json.loads(labels_path.read_text(encoding="utf-8"))
-            except Exception:
-                pass
         token_cost = {
             "input": merged["input_tokens"],
             "output": merged["output_tokens"],
@@ -249,7 +307,7 @@ def run(root: Path, config: Config, *, force: bool = False) -> bool:
         }
         try:
             report_md = _gen_report(
-                G, communities, cohesion, labels, gods, surprises,
+                G, communities, cohesion, community_labels, gods, surprises,
                 detection, token_cost, str(root),
             )
             (graphify_out / "GRAPH_REPORT.md").write_text(report_md, encoding="utf-8")

@@ -27,6 +27,13 @@ class Config:
     out_dir: str = "graphify-out"
     generate_html: bool = True
     generate_report: bool = True
+    # Tokens packed per semantic-extraction chunk. graphify's own default is
+    # 60k, tuned for large hosted models (Claude). Small local models (e.g.
+    # qwen2.5-coder:7b) choke on chunks that big: Ollama auto-sizes num_ctx to
+    # match, and generation over a ~60k context window is so slow it exceeds the
+    # request timeout. A conservative 8k keeps each chunk within a 7B model's
+    # comfortable working set; raise it if you run a larger/faster model.
+    token_budget: int = 8000
 
     def apply_env(self) -> None:
         """Set env vars consumed by graphify.llm BEFORE those modules are imported.
@@ -98,5 +105,16 @@ def load_config(root: Path) -> Config:
     config.out_dir = output.get("out_dir", config.out_dir)
     config.generate_html = bool(output.get("generate_html", config.generate_html))
     config.generate_report = bool(output.get("generate_report", config.generate_report))
+
+    extraction = data.get("extraction", {})
+    try:
+        config.token_budget = int(
+            os.environ.get(
+                "OPENGRAPHIFY_TOKEN_BUDGET",
+                extraction.get("token_budget", config.token_budget),
+            )
+        )
+    except (ValueError, TypeError):
+        pass
 
     return config
