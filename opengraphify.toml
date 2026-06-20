@@ -7,7 +7,7 @@
 provider = "ollama"
 # Small + fast by default so a local CPU/iGPU machine doesn't melt on big repos.
 # Bump to qwen2.5-coder:7b (or larger) if you have a real GPU.
-model    = "qwen2.5-coder:3b"
+model    = "qwen2.5-coder:7b"
 base_url = "http://localhost:11434/v1"
 api_key  = ""
 
