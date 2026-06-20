@@ -126,7 +126,10 @@ def load_config(root: Path, config_path: str | None = None) -> Config:
     if loaded_from is not None:
         print(f"[opengraphify] config: {loaded_from}")
     else:
-        print("[opengraphify] config: defaults (no opengraphify.toml found in search path)")
+        print(
+            "[opengraphify] config: built-in defaults "
+            "(put opengraphify.toml in the repo root to customize)"
+        )
 
     backend = data.get("backend", {})
     config.provider = os.environ.get("OPENGRAPHIFY_PROVIDER", backend.get("provider", config.provider))
@@ -181,4 +184,10 @@ def load_config(root: Path, config_path: str | None = None) -> Config:
     else:
         config.force_json = bool(extraction.get("force_json", config.force_json))
 
+    print(
+        f"[opengraphify]   model={config.model}  "
+        f"token_budget={config.token_budget:,}  "
+        f"force_json={config.force_json}  "
+        f"max_retry_depth={config.max_retry_depth}"
+    )
     return config
