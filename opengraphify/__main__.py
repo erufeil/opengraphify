@@ -85,6 +85,15 @@ def main() -> None:
         help="Force full re-extraction, ignoring the manifest cache",
     )
     parser.add_argument(
+        "--max",
+        type=int,
+        metavar="N",
+        dest="max_files",
+        help="Process at most N uncached semantic files this run, then stop. "
+        "Lets you chip away at a large repo in bounded batches (each run caches "
+        "its progress, so the next run resumes where this one left off).",
+    )
+    parser.add_argument(
         "--status",
         action="store_true",
         help="Show graph status (node/edge count, pending changes) and exit",
@@ -102,7 +111,7 @@ def main() -> None:
     parser.add_argument(
         "--model",
         metavar="MODEL",
-        help="Model name override (e.g. qwen2.5-coder:7b)",
+        help="Model name override (e.g. qwen2.5-coder:3b)",
     )
     parser.add_argument(
         "--base-url",
@@ -143,7 +152,7 @@ def main() -> None:
         watch(root, config, force_first=args.force)
     else:
         from opengraphify.runner import run
-        updated = run(root, config, force=args.force)
+        updated = run(root, config, force=args.force, max_files=args.max_files)
         sys.exit(0 if updated else 0)
 
 

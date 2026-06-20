@@ -143,6 +143,7 @@ opengraphify . --watch         # lo mantiene actualizado en background
 
 ```bash
 opengraphify .                    # una corrida incremental (default)
+opengraphify . --max 50           # procesa 50 archivos nuevos y termina
 opengraphify . --force            # re-extracción completa (ignora caché)
 opengraphify . --status           # estado del grafo: nodos, edges, cambios pendientes
 opengraphify . --watch            # modo daemon, cada 15 min (según config)
@@ -152,6 +153,13 @@ opengraphify . --watch --interval 5
 opengraphify . --model llama3.1:8b
 opengraphify . --base-url https://openrouter.ai/api/v1 --model mistralai/mistral-7b-instruct
 ```
+
+Procesar por tandas con --max ✅ (nuevo). Para un repo grande, en vez de una maratón de 10 h, procesás de a N archivos y vas regulando. Cada corrida cachea su progreso, así la siguiente arranca donde quedó:
+
+opengraphify ./mi-repo --max 50    # procesa 50 archivos nuevos y termina
+opengraphify ./mi-repo --max 50    # los próximos 50, etc.
+--max limita sólo los archivos semánticos sin cachear (la parte lenta con LLM); los ya cacheados no cuentan contra el límite.
+
 
 Durante la extracción semántica vas a ver el avance **archivo por archivo**:
 

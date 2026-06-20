@@ -9,13 +9,25 @@ from pathlib import Path
 from opengraphify.config import Config
 
 
-def run(root: Path, config: Config, *, force: bool = False) -> bool:
+def run(
+    root: Path,
+    config: Config,
+    *,
+    force: bool = False,
+    max_files: int | None = None,
+) -> bool:
     """Execute one graph-update pass.
 
     Returns True when the graph was updated, False when already current.
     All graphify imports are deferred until after config.apply_env() so
     that env vars (OLLAMA_BASE_URL etc.) are set before graphify.llm
     populates its BACKENDS dict.
+
+    max_files: if set, cap the number of *uncached* semantic files processed
+    this run (the slow, LLM-driven step). Lets you chip away at a large repo in
+    bounded batches — e.g. `--max 50` — instead of one marathon pass that pins
+    the CPU for hours. Already-cached files don't count against the cap, so each
+    run makes `max_files` files of fresh progress.
     """
     root = Path(root).resolve()
     graphify_out = root / config.out_dir
@@ -128,6 +140,18 @@ def run(root: Path, config: Config, *, force: bool = False) -> bool:
         if cache_hits:
             print(f"[opengraphify] semantic cache: {cache_hits} hit / {len(uncached_paths)} miss")
 
+        # --max: process only the first N uncached files this run. The rest stay
+        # uncached and are picked up by the next run (they're left out of the
+        # manifest below, so an incremental scan re-detects them). Combined with
+        # per-chunk caching, this turns a huge repo into resumable batches.
+        if max_files is not None and max_files > 0 and len(uncached_paths) > max_files:
+            print(
+                f"[opengraphify] --max {max_files}: processing {max_files} of "
+                f"{len(uncached_paths)} uncached files this run "
+                f"({len(uncached_paths) - max_files} deferred to a later run)"
+            )
+            uncached_paths = uncached_paths[:max_files]
+
         if uncached_paths:
             uncached_pathobjs = [Path(p) for p in uncached_paths]
             n_total = len(uncached_pathobjs)
@@ -151,6 +175,24 @@ def run(root: Path, config: Config, *, force: bool = False) -> bool:
             progress = {"done": 0}
 
             def _on_chunk(idx: int, total: int, _r: dict) -> None:
+                # Persist this chunk's results to the semantic cache immediately.
+                # save_semantic_cache is keyed per source_file, so writing a chunk
+                # at a time is correct and makes the run crash-recoverable: if the
+                # machine dies (e.g. a thermal shutdown) mid-corpus, every chunk
+                # completed so far is already cached and the next run resumes from
+                # where it stopped instead of re-processing everything (#cache).
+                try:
+                    _save_cache(
+                        _r.get("nodes", []),
+                        _r.get("edges", []),
+                        _r.get("hyperedges", []),
+                        root=root,
+                    )
+                except Exception as exc:
+                    print(
+                        f"[opengraphify] WARNING: could not cache chunk {idx + 1}/{total}: {exc}",
+                        file=sys.stderr,
+                    )
                 chunk_files = chunks[idx] if idx < len(chunks) else []
                 for f in chunk_files:
                     progress["done"] += 1

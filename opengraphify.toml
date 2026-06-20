@@ -5,7 +5,9 @@
 #   model    = "mistralai/mistral-7b-instruct"
 #   api_key  = "sk-or-..."   # or set OPENGRAPHIFY_API_KEY env var
 provider = "ollama"
-model    = "qwen2.5-coder:7b"
+# Small + fast by default so a local CPU/iGPU machine doesn't melt on big repos.
+# Bump to qwen2.5-coder:7b (or larger) if you have a real GPU.
+model    = "qwen2.5-coder:3b"
 base_url = "http://localhost:11434/v1"
 api_key  = ""
 
@@ -18,3 +20,10 @@ interval_minutes = 15
 out_dir         = "graphify-out"
 generate_html   = true
 generate_report = true
+
+[extraction]
+# Semantic-extraction tuning for small local models. Lower = lighter/faster per
+# chunk (and cooler), at the cost of more chunks. These two together keep
+# Ollama's num_ctx near its 8k floor.
+token_budget      = 4000   # input tokens packed per LLM chunk
+max_output_tokens = 2048   # cap on generated tokens (exported as GRAPHIFY_MAX_OUTPUT_TOKENS)

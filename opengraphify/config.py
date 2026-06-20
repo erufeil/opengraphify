@@ -20,7 +20,7 @@ else:
 @dataclass
 class Config:
     provider: str = "ollama"
-    model: str = "qwen2.5-coder:7b"
+    model: str = "qwen2.5-coder:3b"
     base_url: str = "http://localhost:11434/v1"
     api_key: str = ""
     interval_minutes: int = 15
@@ -28,12 +28,18 @@ class Config:
     generate_html: bool = True
     generate_report: bool = True
     # Tokens packed per semantic-extraction chunk. graphify's own default is
-    # 60k, tuned for large hosted models (Claude). Small local models (e.g.
-    # qwen2.5-coder:7b) choke on chunks that big: Ollama auto-sizes num_ctx to
-    # match, and generation over a ~60k context window is so slow it exceeds the
-    # request timeout. A conservative 8k keeps each chunk within a 7B model's
-    # comfortable working set; raise it if you run a larger/faster model.
-    token_budget: int = 8000
+    # 60k, tuned for large hosted models (Claude). Small local models choke on
+    # chunks that big: Ollama auto-sizes num_ctx to match, and generation over a
+    # huge context window is so slow it exceeds the request timeout (and pins the
+    # CPU for hours, overheating the machine). 4k input + a small output cap
+    # keeps num_ctx near its 8k floor — fast per chunk and cool. Raise it if you
+    # run a larger/faster model or have a real GPU.
+    token_budget: int = 4000
+    # Hard cap on tokens the model may generate per chunk. graphify reserves this
+    # in Ollama's num_ctx, so a big value inflates the context window (and the
+    # work per chunk) even when the input is small. 2k is plenty for one chunk's
+    # JSON and keeps num_ctx at the floor. Exported as GRAPHIFY_MAX_OUTPUT_TOKENS.
+    max_output_tokens: int = 2048
 
     def apply_env(self) -> None:
         """Set env vars consumed by graphify.llm BEFORE those modules are imported.
@@ -48,6 +54,9 @@ class Config:
         # non-empty placeholder unless the user already provided a real key.
         key = self.api_key or os.environ.get("OPENGRAPHIFY_API_KEY", "") or "opengraphify"
         os.environ["OLLAMA_API_KEY"] = key
+        # Cap the model's per-chunk output. graphify reads GRAPHIFY_MAX_OUTPUT_TOKENS
+        # directly; setdefault so an explicit env var from the user always wins.
+        os.environ.setdefault("GRAPHIFY_MAX_OUTPUT_TOKENS", str(self.max_output_tokens))
 
     def graphify_backend(self) -> str:
         """Return the graphify backend name. All providers use the ollama slot."""
@@ -112,6 +121,15 @@ def load_config(root: Path) -> Config:
             os.environ.get(
                 "OPENGRAPHIFY_TOKEN_BUDGET",
                 extraction.get("token_budget", config.token_budget),
+            )
+        )
+    except (ValueError, TypeError):
+        pass
+    try:
+        config.max_output_tokens = int(
+            os.environ.get(
+                "GRAPHIFY_MAX_OUTPUT_TOKENS",
+                extraction.get("max_output_tokens", config.max_output_tokens),
             )
         )
     except (ValueError, TypeError):
