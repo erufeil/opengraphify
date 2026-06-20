@@ -96,7 +96,7 @@ def load_config(root: Path, config_path: str | None = None) -> Config:
         candidates = [
             root / "opengraphify.toml",
             Path.cwd() / "opengraphify.toml",
-            Path.home() / ".opengraphify" / "config.toml",
+            Path.home() / ".opengraphify" / "opengraphify.toml",
         ]
 
     data: dict = {}

@@ -204,11 +204,11 @@ disparador "al iniciar sesión".
 >
 > 1. `<repo-que-escaneás>/opengraphify.toml` — el repo pasado como argumento
 > 2. `<directorio-actual>/opengraphify.toml` — tu *cwd* al ejecutar
-> 3. `%USERPROFILE%\.opengraphify\config.toml` — **config global** (aplica siempre)
+> 3. `%USERPROFILE%\.opengraphify\opengraphify.toml` — **config global** (aplica siempre)
 >
 > Editar el `opengraphify.toml` del repo *instalado* (`~/.opengraphify\opengraphify\`)
 > **no** sirve: no está en esa lista. Para una config que valga en todos lados, usá la
-> **global** `%USERPROFILE%\.opengraphify\config.toml`. Cada corrida imprime qué archivo
+> **global** `%USERPROFILE%\.opengraphify\opengraphify.toml`. Cada corrida imprime qué archivo
 > cargó (`[opengraphify] config: ...`) para que veas exactamente cuál está en efecto.
 > También podés forzar uno con `--config RUTA\al\opengraphify.toml`.
 
