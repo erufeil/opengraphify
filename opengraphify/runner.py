@@ -39,11 +39,13 @@ def run(
     # ------------------------------------------------------------------ #
     # 1. Detect changed files
     # ------------------------------------------------------------------ #
+    print(f"[opengraphify] loading graphify.detect ...", flush=True)
     from graphify.detect import (
         detect as _detect,
         detect_incremental as _detect_incremental,
         save_manifest as _save_manifest,
     )
+    print(f"[opengraphify] ready", flush=True)
 
     incremental = not force and manifest_path.exists() and graph_json_path.exists()
 
@@ -202,6 +204,24 @@ def run(
                         flush=True,
                     )
 
+            # Force valid JSON output for small local models (they otherwise
+            # reply in prose, which graphify can't parse). This goes through the
+            # backend's extra_body, which also bypasses graphify's auto num_ctx —
+            # so we pin a fixed num_ctx sized to our budgets. Scoped to the
+            # extraction call and restored afterwards so community labeling later
+            # keeps graphify's own num_ctx handling.
+            _prev_extra = _BACKENDS["ollama"].get("extra_body")
+            if config.force_json:
+                _num_ctx = max(8192, config.token_budget + config.max_output_tokens + 2000)
+                _BACKENDS["ollama"]["extra_body"] = {
+                    "options": {"num_ctx": _num_ctx},
+                    "keep_alive": "10m",
+                    "response_format": {"type": "json_object"},
+                }
+                print(
+                    f"[opengraphify] forcing JSON output (num_ctx={_num_ctx:,}, "
+                    f"max_retry_depth={config.max_retry_depth})"
+                )
             try:
                 fresh = _extract_corpus_parallel(
                     uncached_pathobjs,
@@ -210,6 +230,7 @@ def run(
                     model=config.model,
                     root=root,
                     token_budget=_TOKEN_BUDGET,
+                    max_retry_depth=config.max_retry_depth,
                     on_chunk_done=_on_chunk,
                 )
                 try:
@@ -229,6 +250,8 @@ def run(
                 sem_result["output_tokens"] += fresh.get("output_tokens", 0)
             except Exception as exc:
                 print(f"[opengraphify] semantic extraction failed: {exc}", file=sys.stderr)
+            finally:
+                _BACKENDS["ollama"]["extra_body"] = _prev_extra
 
     # ------------------------------------------------------------------ #
     # 4. Merge AST + semantic results

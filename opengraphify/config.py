@@ -40,6 +40,18 @@ class Config:
     # work per chunk) even when the input is small. 2k is plenty for one chunk's
     # JSON and keeps num_ctx at the floor. Exported as GRAPHIFY_MAX_OUTPUT_TOKENS.
     max_output_tokens: int = 2048
+    # When a chunk yields no nodes/edges (a small model rambling, or a genuinely
+    # content-less file), graphify treats it as a truncation and recursively
+    # bisects+retries — up to 2**max_retry_depth calls per chunk. graphify's
+    # default is 3 (8×), which on trivial files (e.g. .github/*) becomes a retry
+    # storm that wastes time and heats the CPU. 1 caps it at one split.
+    max_retry_depth: int = 1
+    # Force the model to emit valid JSON (Ollama `response_format=json_object`).
+    # Small local models otherwise reply in prose ("The provided content appears
+    # to be...") which graphify can't parse. When on, opengraphify also pins a
+    # fixed num_ctx (token_budget + max_output_tokens + headroom) for the
+    # extraction call. Set false to fall back to graphify's auto num_ctx.
+    force_json: bool = True
 
     def apply_env(self) -> None:
         """Set env vars consumed by graphify.llm BEFORE those modules are imported.
@@ -63,23 +75,32 @@ class Config:
         return "ollama"
 
 
-def load_config(root: Path) -> Config:
-    """Load config from the first opengraphify.toml found, then apply env overrides.
+def load_config(root: Path, config_path: str | None = None) -> Config:
+    """Load config from a toml file, then apply env overrides.
 
-    Search order:
-      1. <root>/opengraphify.toml          (repo-specific)
-      2. <cwd>/opengraphify.toml           (working-directory)
+    If config_path is given (CLI --config), only that file is read. Otherwise the
+    first existing file in this search order wins:
+      1. <root>/opengraphify.toml          (the repo being scanned)
+      2. <cwd>/opengraphify.toml           (current working directory)
       3. ~/.opengraphify/config.toml       (user global)
+
+    The chosen file (or "defaults") is printed so it's obvious which config is
+    actually in effect — a frequent source of "it's ignoring my toml" confusion
+    when the toml lives somewhere outside this search path.
     """
     config = Config()
 
-    candidates = [
-        root / "opengraphify.toml",
-        Path.cwd() / "opengraphify.toml",
-        Path.home() / ".opengraphify" / "config.toml",
-    ]
+    if config_path:
+        candidates = [Path(config_path)]
+    else:
+        candidates = [
+            root / "opengraphify.toml",
+            Path.cwd() / "opengraphify.toml",
+            Path.home() / ".opengraphify" / "config.toml",
+        ]
 
     data: dict = {}
+    loaded_from: Path | None = None
     for path in candidates:
         if path.exists():
             if tomllib is None:
@@ -92,9 +113,20 @@ def load_config(root: Path) -> Config:
             try:
                 with open(path, "rb") as fh:
                     data = tomllib.load(fh)
+                loaded_from = path
                 break
             except Exception as exc:
                 print(f"[opengraphify] WARNING: could not read {path}: {exc}", file=sys.stderr)
+
+    if config_path and loaded_from is None:
+        print(
+            f"[opengraphify] WARNING: --config {config_path} not found; using defaults + env",
+            file=sys.stderr,
+        )
+    if loaded_from is not None:
+        print(f"[opengraphify] config: {loaded_from}")
+    else:
+        print("[opengraphify] config: defaults (no opengraphify.toml found in search path)")
 
     backend = data.get("backend", {})
     config.provider = os.environ.get("OPENGRAPHIFY_PROVIDER", backend.get("provider", config.provider))
@@ -134,5 +166,19 @@ def load_config(root: Path) -> Config:
         )
     except (ValueError, TypeError):
         pass
+    try:
+        config.max_retry_depth = int(
+            os.environ.get(
+                "OPENGRAPHIFY_MAX_RETRY_DEPTH",
+                extraction.get("max_retry_depth", config.max_retry_depth),
+            )
+        )
+    except (ValueError, TypeError):
+        pass
+    _fj = os.environ.get("OPENGRAPHIFY_FORCE_JSON")
+    if _fj is not None:
+        config.force_json = _fj.strip().lower() not in ("0", "false", "no", "")
+    else:
+        config.force_json = bool(extraction.get("force_json", config.force_json))
 
     return config

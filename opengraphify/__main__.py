@@ -128,7 +128,7 @@ def main() -> None:
 
     # Load config — before any graphify imports so env vars are ready
     from opengraphify.config import load_config
-    config = load_config(root)
+    config = load_config(root, getattr(args, "config", None))
 
     # Apply CLI overrides
     if args.backend:

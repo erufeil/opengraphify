@@ -120,10 +120,14 @@ Hace, de punta a punta:
 | --- | --- |
 | Python 3.10+ | [python.org](https://www.python.org/downloads/) — marcar *Add Python to PATH* |
 | Git | [git-scm.com](https://git-scm.com/download/win) — marcar *Add Git to PATH* |
-| Ollama (backend por defecto) | [ollama.com](https://ollama.com) + `ollama pull qwen2.5-coder:7b` |
+| Ollama (backend por defecto) | [ollama.com](https://ollama.com) + `ollama pull qwen2.5-coder:3b` |
 
 > **Ollama no necesita modo server.** En Windows corre como servicio de fondo automáticamente
 > al instalarlo (queda escuchando en `http://localhost:11434`). No hace falta `ollama serve`.
+>
+> 🎮 **¿Notebook sin GPU NVIDIA (iGPU Intel/AMD)?** El Ollama oficial corre en **CPU** y en
+> repos grandes recalienta. Para acelerar con una **iGPU Intel Arc** (vía IPEX-LLM) y poder
+> usar el 7B sin freír la CPU, mirá **[README-GPU.md](README-GPU.md)**.
 
 ---
 
@@ -152,26 +156,35 @@ opengraphify . --watch --interval 5
 # Overrides inline sin tocar el toml
 opengraphify . --model llama3.1:8b
 opengraphify . --base-url https://openrouter.ai/api/v1 --model mistralai/mistral-7b-instruct
+opengraphify . --max 5 --model qwen2.5-coder:7b
 ```
 
-Procesar por tandas con --max ✅ (nuevo). Para un repo grande, en vez de una maratón de 10 h, procesás de a N archivos y vas regulando. Cada corrida cachea su progreso, así la siguiente arranca donde quedó:
+### Procesar repos grandes por tandas con `--max`
 
+Para un repo grande, en vez de una maratón de horas que puede recalentar la máquina,
+procesás de a **N archivos** y vas regulando. Cada corrida **cachea su progreso** (caché
+por chunk), así la siguiente arranca donde quedó — incluso si la anterior se cortó:
+
+```bash
 opengraphify ./mi-repo --max 50    # procesa 50 archivos nuevos y termina
 opengraphify ./mi-repo --max 50    # los próximos 50, etc.
---max limita sólo los archivos semánticos sin cachear (la parte lenta con LLM); los ya cacheados no cuentan contra el límite.
+```
 
+> `--max` limita solo los archivos **semánticos sin cachear** (la parte lenta con LLM);
+> los ya cacheados no cuentan contra el límite.
 
 Durante la extracción semántica vas a ver el avance **archivo por archivo**:
 
 ```text
-[opengraphify] semantic extraction on 56 files via ollama (qwen2.5-coder:7b)...
+[opengraphify] semantic extraction on 56 files via ollama (qwen2.5-coder:3b), token_budget=4,000...
 [opengraphify] semantic extraction on README.md (1/56)
 [opengraphify] semantic extraction on ARCHITECTURE.md (2/56)
 ...
 ```
 
 > Los archivos se procesan en *chunks* paralelos, así que las líneas aparecen en ráfagas
-> (varios archivos de golpe cada vez que un chunk del modelo responde).
+> (varios archivos de golpe cada vez que un chunk del modelo responde). El caché se guarda
+> **después de cada chunk**, así que un corte (o un apagón térmico) es recuperable.
 
 ### Como servicio en background (Windows)
 
@@ -186,13 +199,26 @@ disparador "al iniciar sesión".
 
 ## ⚙️ Configuración
 
-Poné un `opengraphify.toml` en la raíz de cualquier repo. Si no hay, usa los defaults
-(Ollama + `qwen2.5-coder:7b`, cada 15 min).
+> ⚠️ **Dónde tiene que estar el `opengraphify.toml`** (causa típica de "no lee mi
+> config"). Se busca, **en este orden**, y gana el primero que exista:
+>
+> 1. `<repo-que-escaneás>/opengraphify.toml` — el repo pasado como argumento
+> 2. `<directorio-actual>/opengraphify.toml` — tu *cwd* al ejecutar
+> 3. `%USERPROFILE%\.opengraphify\config.toml` — **config global** (aplica siempre)
+>
+> Editar el `opengraphify.toml` del repo *instalado* (`~/.opengraphify\opengraphify\`)
+> **no** sirve: no está en esa lista. Para una config que valga en todos lados, usá la
+> **global** `%USERPROFILE%\.opengraphify\config.toml`. Cada corrida imprime qué archivo
+> cargó (`[opengraphify] config: ...`) para que veas exactamente cuál está en efecto.
+> También podés forzar uno con `--config RUTA\al\opengraphify.toml`.
+
+Poné un `opengraphify.toml` en la raíz del repo (o usá la config global). Si no hay ninguno,
+usa los defaults (Ollama + `qwen2.5-coder:3b`, cada 15 min).
 
 ```toml
 [backend]
 provider = "ollama"                    # proveedor
-model    = "qwen2.5-coder:7b"          # modelo
+model    = "qwen2.5-coder:3b"          # modelo (3b: liviano para CPU/iGPU; subí a 7b con GPU)
 base_url = "http://localhost:11434/v1" # endpoint (Ollama por defecto)
 api_key  = ""                          # vacío para Ollama local
 
@@ -203,6 +229,13 @@ interval_minutes = 15
 out_dir         = "graphify-out"   # debe coincidir con el out_dir de graphify
 generate_html   = true
 generate_report = true
+
+[extraction]
+# Tuning para modelos locales chicos (más chico = más liviano/rápido por chunk).
+token_budget      = 4000   # tokens de entrada empacados por chunk
+max_output_tokens = 2048   # tope de salida por chunk (se exporta como GRAPHIFY_MAX_OUTPUT_TOKENS)
+force_json        = true   # fuerza salida JSON (modelos chicos si no responden en prosa)
+max_retry_depth   = 1      # reintentos por bisección en chunks vacíos/fallidos (0 = ninguno)
 ```
 
 ### Usar OpenRouter en lugar de Ollama
@@ -224,6 +257,8 @@ api_key  = "sk-or-..."
 | `OPENGRAPHIFY_BASE_URL` | URL base del endpoint |
 | `OPENGRAPHIFY_API_KEY` | API key |
 | `OPENGRAPHIFY_INTERVAL` | Intervalo en minutos para `--watch` |
+| `OPENGRAPHIFY_TOKEN_BUDGET` | Tokens de entrada por chunk (default 4000) |
+| `GRAPHIFY_MAX_OUTPUT_TOKENS` | Tope de salida por chunk (default 2048) |
 
 ---
 
@@ -258,10 +293,15 @@ Re-clona graphify y opengraphify desde GitHub (última versión) y los reinstala
 
 | Caso | Modelo | Proveedor |
 | --- | --- | --- |
-| Gratis, sin internet | `qwen2.5-coder:7b` | Ollama local |
-| Repos grandes (>500 archivos) | `codestral:22b` | Ollama local |
+| Default liviano (CPU / iGPU, sin internet) | `qwen2.5-coder:3b` | Ollama local |
+| Mejor calidad (necesita GPU o CPU potente) | `qwen2.5-coder:7b` | Ollama local |
+| Repos grandes con GPU dedicada | `codestral:22b` | Ollama local |
 | Muy rápido y barato | `mistralai/mistral-7b-instruct` | OpenRouter |
 | Alta calidad semántica | `deepseek/deepseek-coder-v2-lite-instruct` | OpenRouter |
+
+> El default es el **3B** porque es seguro en CPU/iGPU. El **7B** entrega bastante mejor
+> calidad de extracción; si tu hardware lo aguanta (idealmente GPU), subilo en el toml. Para
+> correr el 7B acelerado por una **iGPU Intel Arc**, ver **[README-GPU.md](README-GPU.md)**.
 
 ---
 
@@ -344,7 +384,7 @@ python -c "import sys; print(sys.executable)"
 **Causas y soluciones:**
 - **Ollama no está corriendo:** abrí la app de Ollama (en Windows queda como servicio de
   fondo). Probá `curl http://localhost:11434/api/tags`.
-- **Modelo no descargado:** `ollama pull qwen2.5-coder:7b`.
+- **Modelo no descargado:** `ollama pull qwen2.5-coder:3b` (o el que tengas en el toml).
 - **Otro endpoint/puerto:** ajustá `base_url` en `opengraphify.toml` o pasá
   `--base-url http://localhost:11434/v1`.
 
@@ -364,6 +404,21 @@ opengraphify . --force
 ```
 </details>
 
+<details>
+<summary><b>La notebook se recalienta / quiero usar la GPU Intel (no NVIDIA)</b></summary>
+
+El Ollama oficial solo acelera con **NVIDIA (CUDA)** o **AMD (ROCm)**; con una **iGPU Intel
+Arc** corre en **CPU**, y en repos grandes eso recalienta (en casos extremos, BSOD del driver
+Intel `igdlmdn64.sys`). Para correr el modelo sobre la Arc vía **IPEX-LLM** (más velocidad,
+menos calor, y poder usar el 7B), seguí la guía dedicada:
+
+➡️ **[README-GPU.md](README-GPU.md)** — reinstalar el driver Arc, verificar la GPU, instalar
+el Ollama de IPEX-LLM y arrancarlo (incluye el troubleshooting de "`ollama list` se cuelga").
+
+Mientras tanto, para bajar el estrés en CPU: usá el default **3B**, `--max N` para procesar por
+tandas, y `OPENGRAPHIFY_TOKEN_BUDGET` más chico.
+</details>
+
 ---
 
 ## 📄 Licencia
@@ -373,3 +428,6 @@ OpenGraphify se distribuye bajo licencia **[MIT](LICENSE)** © 2026 erufeil.
 El motor subyacente, **[graphify](https://github.com/safishamsi/graphify)**, es de
 [@safishamsi](https://github.com/safishamsi) y mantiene su propia licencia. Revisá los términos
 en su repositorio oficial antes de redistribuir.
+
+
+

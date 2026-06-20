@@ -27,3 +27,5 @@ generate_report = true
 # Ollama's num_ctx near its 8k floor.
 token_budget      = 4000   # input tokens packed per LLM chunk
 max_output_tokens = 2048   # cap on generated tokens (exported as GRAPHIFY_MAX_OUTPUT_TOKENS)
+force_json        = true    # force valid JSON output (small models otherwise reply in prose)
+max_retry_depth   = 1       # bisect+retry depth for empty/failed chunks (0 = no retries; graphify default 3)
