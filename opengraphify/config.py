@@ -97,6 +97,9 @@ def load_config(root: Path, config_path: str | None = None) -> Config:
             root / "opengraphify.toml",
             Path.cwd() / "opengraphify.toml",
             Path.home() / ".opengraphify" / "opengraphify.toml",
+            # toml that ships with the installed package (cloned by actualiza-librerias.bat)
+            # lowest priority: overridden by anything above
+            Path.home() / ".opengraphify" / "opengraphify" / "opengraphify.toml",
         ]
 
     data: dict = {}
