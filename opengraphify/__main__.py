@@ -2,9 +2,61 @@
 from __future__ import annotations
 
 import argparse
+import atexit
 import json
+import os
 import sys
 from pathlib import Path
+
+
+def _arm_hang_watchdog() -> None:
+    """Opt-in stack dumper for diagnosing a stuck run.
+
+    Set OPENGRAPHIFY_DEBUG_HANG=1 (or to a number of seconds) and, if any phase
+    blocks longer than that window, faulthandler prints the full traceback of
+    every thread to stderr — repeatedly — so a hang shows exactly which frame is
+    stuck (e.g. a blocking HTTP read against the Ollama backend) instead of a
+    silent frozen cursor. No effect unless the env var is set.
+    """
+    raw = os.environ.get("OPENGRAPHIFY_DEBUG_HANG", "").strip()
+    if not raw or raw.lower() in ("0", "false", "no"):
+        return
+    try:
+        secs = float(raw) if raw.lower() not in ("1", "true", "yes") else 120.0
+    except ValueError:
+        secs = 120.0
+    import faulthandler
+    faulthandler.dump_traceback_later(secs, repeat=True, file=sys.stderr)
+    print(
+        f"[opengraphify] hang watchdog armed: dumping stacks every {secs:g}s "
+        "while a phase is blocked (OPENGRAPHIFY_DEBUG_HANG)",
+        file=sys.stderr,
+    )
+
+
+def _fast_exit(code: int = 0) -> None:
+    """Flush output, run atexit handlers, then hard-exit the process.
+
+    A one-shot run writes every artifact (graph.json/html, manifest, caches) to
+    disk synchronously inside run(), so once it returns there is nothing left to
+    do. Returning through the interpreter's normal shutdown, however, can stall
+    for minutes: an unclosed openai/httpx client keeps a keep-alive socket to the
+    (often remote) Ollama backend, and finalizing it at teardown is what leaves
+    the cursor hanging after "done". We run atexit handlers explicitly first so
+    graphify's stat-index cache is still flushed (keeps next run's change
+    detection fast), then os._exit past the teardown phase entirely.
+
+    Escape hatch: OPENGRAPHIFY_NO_FAST_EXIT=1 restores the normal sys.exit path.
+    """
+    if os.environ.get("OPENGRAPHIFY_NO_FAST_EXIT", "").strip() in ("1", "true", "yes"):
+        sys.exit(code)
+    try:
+        sys.stdout.flush()
+        sys.stderr.flush()
+        atexit._run_exitfuncs()
+    except Exception:
+        pass
+    os._exit(code)
 
 
 def _status(root: Path, config) -> None:
@@ -147,13 +199,17 @@ def main() -> None:
         _status(root, config)
         return
 
+    _arm_hang_watchdog()
+
     if args.watch:
         from opengraphify.scheduler import watch
         watch(root, config, force_first=args.force)
     else:
         from opengraphify.runner import run
-        updated = run(root, config, force=args.force, max_files=args.max_files)
-        sys.exit(0 if updated else 0)
+        run(root, config, force=args.force, max_files=args.max_files)
+        # All outputs are on disk; skip the slow interpreter teardown that
+        # otherwise hangs on a lingering keep-alive socket to Ollama.
+        _fast_exit(0)
 
 
 if __name__ == "__main__":

@@ -1,6 +1,8 @@
 # Open Graphify
 
+## Modo de Ejecución Autónoma
 
+Ejecuta todas las consultas hechas por el usuario de forma autónoma, de principio a fin, sin consultar nada al usuario. Ante cualquier decisión técnica, elige la opción más estándar según las buenas prácticas, evitando sobreingeniería. Solo interrumpe si hay un error bloqueante que no puedas resolver por tus propios medios.
 
 ## Referencia de Archivos de Contexto
 
@@ -15,15 +17,15 @@ Este proyecto utiliza un sistema de documentación modular para mantener el cont
 
 Cada vez que termines una intervención debes actualizar los documentos para que reflejen los últimos cambios, y crear un archivo `CLAUDE-rta<N>.md` con todo lo realizado en esa intervención.
 
-Metodo de Instalacion solo con:
-Commit y
-install.bat
+## Metodo de Instalacion solo con:
+Usuario hace el Commit y
+Usuario hace el install.bat
 
-Metodo de actualizacion solo con:
-commit y
-actualiza-librerias.bat
+## Metodo de actualizacion solo con:
+Usuario hace el commit y
+Usuario hace el actualiza-librerias.bat
 
-Plan Features:
+# Plan Features:
 
 ### mejora 1: vista Obsidian
 

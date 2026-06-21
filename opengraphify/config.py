@@ -52,6 +52,15 @@ class Config:
     # fixed num_ctx (token_budget + max_output_tokens + headroom) for the
     # extraction call. Set false to fall back to graphify's auto num_ctx.
     force_json: bool = True
+    # Per-request HTTP timeout (seconds) for the LLM backend. graphify's own
+    # default is 600s (10 min) — far too long for a local/LAN Ollama on a real
+    # GPU, where a healthy chunk completes in seconds. When the backend stalls
+    # (remote Ollama busy, model reload, LAN hiccup, a keep-alive socket that
+    # never delivers), that 600s ceiling is exactly how long the CLI appears to
+    # "hang" before the cursor returns. Capping it here turns a 10-minute freeze
+    # into a bounded ~3-minute failure that graphify's retry/skip handles
+    # gracefully. Exported as GRAPHIFY_API_TIMEOUT (setdefault — explicit env wins).
+    api_timeout: float = 180.0
 
     def apply_env(self) -> None:
         """Set env vars consumed by graphify.llm BEFORE those modules are imported.
@@ -69,6 +78,10 @@ class Config:
         # Cap the model's per-chunk output. graphify reads GRAPHIFY_MAX_OUTPUT_TOKENS
         # directly; setdefault so an explicit env var from the user always wins.
         os.environ.setdefault("GRAPHIFY_MAX_OUTPUT_TOKENS", str(self.max_output_tokens))
+        # Cap the LLM request timeout so a stalled backend fails fast instead of
+        # freezing the run for graphify's 600s default. setdefault so an explicit
+        # GRAPHIFY_API_TIMEOUT from the user always wins.
+        os.environ.setdefault("GRAPHIFY_API_TIMEOUT", str(self.api_timeout))
 
     def graphify_backend(self) -> str:
         """Return the graphify backend name. All providers use the ollama slot."""
@@ -186,11 +199,21 @@ def load_config(root: Path, config_path: str | None = None) -> Config:
         config.force_json = _fj.strip().lower() not in ("0", "false", "no", "")
     else:
         config.force_json = bool(extraction.get("force_json", config.force_json))
+    try:
+        config.api_timeout = float(
+            os.environ.get(
+                "OPENGRAPHIFY_API_TIMEOUT",
+                extraction.get("api_timeout", config.api_timeout),
+            )
+        )
+    except (ValueError, TypeError):
+        pass
 
     print(
         f"[opengraphify]   model={config.model}  "
         f"token_budget={config.token_budget:,}  "
         f"force_json={config.force_json}  "
-        f"max_retry_depth={config.max_retry_depth}"
+        f"max_retry_depth={config.max_retry_depth}  "
+        f"api_timeout={config.api_timeout:g}s"
     )
     return config
