@@ -35,3 +35,10 @@ max_retry_depth   = 1       # bisect+retry depth for empty/failed chunks (0 = no
 # before it gives up. 180s bounds that without cutting off legitimate work.
 # Raise it only if a single chunk genuinely needs longer (huge model / no GPU).
 api_timeout       = 180
+# In-run retry for transient backend errors (Cloudflare 524, HTTP 429/5xx,
+# connection resets). graphify only retries truncation, so without this a
+# transient HTTP error drops the whole chunk until the next run. A retryable
+# error waits the server's Retry-After (or retry_wait_seconds if none) and
+# retries up to chunk_retries times before giving up. 0 = disable.
+chunk_retries     = 2
+retry_wait_seconds = 30

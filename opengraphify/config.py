@@ -52,6 +52,17 @@ class Config:
     # fixed num_ctx (token_budget + max_output_tokens + headroom) for the
     # extraction call. Set false to fall back to graphify's auto num_ctx.
     force_json: bool = True
+    # In-run retry for transient/retryable backend errors (Cloudflare 524, HTTP
+    # 429/5xx, connection resets/timeouts). graphify's adaptive retry only
+    # bisects on truncation/context-overflow and re-raises everything else, so
+    # without this a single transient HTTP error drops the whole chunk for the
+    # run (recovered only on the *next* run). chunk_retries = how many extra
+    # times one LLM call is retried on a retryable error; retry_wait_seconds =
+    # the fallback backoff when the server sends no Retry-After / retry_after
+    # hint (that hint IS honoured when present, e.g. Cloudflare 524's
+    # retry_after=120). Set chunk_retries=0 to disable.
+    chunk_retries: int = 2
+    retry_wait_seconds: float = 30.0
     # Per-request HTTP timeout (seconds) for the LLM backend. graphify's own
     # default is 600s (10 min) — far too long for a local/LAN Ollama on a real
     # GPU, where a healthy chunk completes in seconds. When the backend stalls
@@ -208,12 +219,31 @@ def load_config(root: Path, config_path: str | None = None) -> Config:
         )
     except (ValueError, TypeError):
         pass
+    try:
+        config.chunk_retries = int(
+            os.environ.get(
+                "OPENGRAPHIFY_CHUNK_RETRIES",
+                extraction.get("chunk_retries", config.chunk_retries),
+            )
+        )
+    except (ValueError, TypeError):
+        pass
+    try:
+        config.retry_wait_seconds = float(
+            os.environ.get(
+                "OPENGRAPHIFY_RETRY_WAIT",
+                extraction.get("retry_wait_seconds", config.retry_wait_seconds),
+            )
+        )
+    except (ValueError, TypeError):
+        pass
 
     print(
         f"[opengraphify]   model={config.model}  "
         f"token_budget={config.token_budget:,}  "
         f"force_json={config.force_json}  "
         f"max_retry_depth={config.max_retry_depth}  "
-        f"api_timeout={config.api_timeout:g}s"
+        f"api_timeout={config.api_timeout:g}s  "
+        f"chunk_retries={config.chunk_retries}"
     )
     return config

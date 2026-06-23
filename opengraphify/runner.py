@@ -9,6 +9,99 @@ from pathlib import Path
 from opengraphify.config import Config
 
 
+# HTTP status codes worth retrying: request timeout / conflict / too-early,
+# rate limit, and the 5xx family — including Cloudflare's own 52x origin
+# errors (524 = origin response timeout, the case that prompted this).
+_RETRYABLE_STATUS = {408, 409, 425, 429, 500, 502, 503, 504, 520, 521, 522, 523, 524, 525, 527, 529}
+# openai SDK errors that carry no status_code but are still transient.
+_RETRYABLE_EXC_NAMES = {"APITimeoutError", "APIConnectionError"}
+
+
+def _retryable_wait(exc: BaseException, default_wait: float) -> float | None:
+    """Seconds to wait before retrying `exc`, or None if it is not retryable.
+
+    Honours a server-supplied `Retry-After` header or a `retry_after` field in
+    the error body (e.g. Cloudflare 524) when present; otherwise falls back to
+    `default_wait`. Non-transient errors (auth failures, HTTP 400 context
+    overflow, etc.) return None so they propagate unchanged — graphify's own
+    bisect retry still handles context-overflow.
+    """
+    status = getattr(exc, "status_code", None)
+    if status not in _RETRYABLE_STATUS and type(exc).__name__ not in _RETRYABLE_EXC_NAMES:
+        return None
+    wait: float | None = None
+    body = getattr(exc, "body", None)
+    if isinstance(body, dict):
+        raw = body.get("retry_after", body.get("retry-after"))
+        try:
+            wait = float(raw) if raw is not None else None
+        except (TypeError, ValueError):
+            wait = None
+    if wait is None:
+        headers = getattr(getattr(exc, "response", None), "headers", None)
+        if headers is not None:
+            try:
+                raw = headers.get("retry-after")
+                wait = float(raw) if raw is not None else None
+            except (TypeError, ValueError):
+                wait = None
+    if wait is None:
+        wait = default_wait
+    return max(1.0, min(wait, 300.0))
+
+
+def _install_http_retry(config: Config) -> None:
+    """Wrap graphify's LLM-call functions with retry-on-retryable-HTTP-error.
+
+    graphify is re-cloned on every update (actualiza-librerias.bat), so this
+    fix lives here and is applied at runtime — mirroring how opengraphify
+    already patches `graphify.llm.BACKENDS`. graphify's adaptive retry only
+    bisects truncation/context-overflow and re-raises transient HTTP errors
+    (Cloudflare 524, 429, 5xx, connection resets), dropping the whole chunk for
+    the run. Wrapping the single-call functions lets a retryable error wait +
+    retry in-run, recovering the chunk instead of deferring it to the next run.
+    Idempotent: the `_og_retry_wrapped` guard keeps --watch loops from stacking
+    wrappers.
+    """
+    if config.chunk_retries <= 0:
+        return
+    try:
+        from graphify import llm as _llm
+    except Exception as exc:  # noqa: BLE001
+        print(f"[opengraphify] WARNING: could not install HTTP retry: {exc}", file=sys.stderr)
+        return
+
+    import functools
+
+    def _wrap(func):
+        @functools.wraps(func)
+        def wrapper(*args, **kwargs):
+            attempt = 0
+            while True:
+                try:
+                    return func(*args, **kwargs)
+                except Exception as exc:  # noqa: BLE001
+                    wait = _retryable_wait(exc, config.retry_wait_seconds)
+                    if wait is None or attempt >= config.chunk_retries:
+                        raise
+                    attempt += 1
+                    print(
+                        f"[opengraphify] retryable backend error ({type(exc).__name__}): "
+                        f"retry {attempt}/{config.chunk_retries} in {wait:g}s...",
+                        file=sys.stderr,
+                        flush=True,
+                    )
+                    time.sleep(wait)
+        wrapper._og_retry_wrapped = True  # type: ignore[attr-defined]
+        return wrapper
+
+    for fname in ("_call_openai_compat", "_call_llm"):
+        fn = getattr(_llm, fname, None)
+        if fn is None or getattr(fn, "_og_retry_wrapped", False):
+            continue
+        setattr(_llm, fname, _wrap(fn))
+
+
 def run(
     root: Path,
     config: Config,
@@ -85,6 +178,10 @@ def run(
             f"[opengraphify] found {len(code_files)} code, "
             f"{len(doc_files)} docs, {len(paper_files)} papers, {len(image_files)} images"
         )
+
+    # Install in-run retry for transient backend HTTP errors before any LLM work
+    # (covers both semantic extraction and community labeling this run).
+    _install_http_retry(config)
 
     # ------------------------------------------------------------------ #
     # 2. AST extraction on code files (no LLM)

@@ -74,6 +74,22 @@ El pipeline tiene dos tipos de extracción muy distintos:
 > 🔌 **Corolario:** en un repo de **puro código** (sin docs/papers/imágenes), opengraphify
 > arma el grafo completo **sin una sola llamada al modelo** — ni necesitás Ollama instalado.
 
+### 🖼️ Imágenes y visión (importante)
+
+Un modelo de **texto** (qwen2.5-coder, mistral, etc.) **no puede ver imágenes**. Por eso, con
+el backend por defecto, opengraphify **ni siquiera manda los píxeles**: cada imagen raster
+(`.jpg/.png/.webp/.gif`) se convierte en un **nodo** del grafo, pero su descripción es un
+**texto adivinado a partir del nombre del archivo**, no una lectura real del contenido.
+
+- **SVG es la excepción:** como es XML (texto), se lee como código y el modelo **sí** lo
+  interpreta de verdad.
+- **¿Querés descripciones reales en local?** Usá un **modelo de visión** en Ollama y prendé el
+  candado: `ollama pull llama3.2-vision`, correr con `--model llama3.2-vision` y la variable
+  `GRAPHIFY_OLLAMA_VISION=1`. (Pesa más; en una GPU con ~12 GB+ entra bien.)
+- **Con Claude** (backend con visión) sí se mandan los píxeles y devuelve una descripción real.
+- **¿No aportan?** Si son screenshots/fotos sin valor para el grafo, conviene **excluirlas** del
+  scan: cuestan VRAM y tiempo para nodos-placeholder.
+
 ---
 
 ## 🏗️ Arquitectura
@@ -232,10 +248,14 @@ generate_report = true
 
 [extraction]
 # Tuning para modelos locales chicos (más chico = más liviano/rápido por chunk).
-token_budget      = 4000   # tokens de entrada empacados por chunk
-max_output_tokens = 2048   # tope de salida por chunk (se exporta como GRAPHIFY_MAX_OUTPUT_TOKENS)
-force_json        = true   # fuerza salida JSON (modelos chicos si no responden en prosa)
-max_retry_depth   = 1      # reintentos por bisección en chunks vacíos/fallidos (0 = ninguno)
+token_budget       = 4000   # tokens de entrada empacados por chunk
+max_output_tokens  = 2048   # tope de salida por chunk (se exporta como GRAPHIFY_MAX_OUTPUT_TOKENS)
+force_json         = true   # fuerza salida JSON (modelos chicos si no responden en prosa)
+max_retry_depth    = 1      # reintentos por bisección en chunks vacíos/fallidos (0 = ninguno)
+# Resiliencia de red (ver "Errores, cuelgues y recuperación" más abajo)
+api_timeout        = 180    # tope (seg) por request; corta un cuelgue de red (graphify default: 600 = 10 min)
+chunk_retries      = 2      # reintentos in-run ante errores transitorios (524/429/5xx); 0 = ninguno
+retry_wait_seconds = 30     # espera entre reintentos si el server no manda Retry-After (el 524 sí lo manda)
 ```
 
 ### Usar OpenRouter en lugar de Ollama
@@ -259,6 +279,12 @@ api_key  = "sk-or-..."
 | `OPENGRAPHIFY_INTERVAL` | Intervalo en minutos para `--watch` |
 | `OPENGRAPHIFY_TOKEN_BUDGET` | Tokens de entrada por chunk (default 4000) |
 | `GRAPHIFY_MAX_OUTPUT_TOKENS` | Tope de salida por chunk (default 2048) |
+| `OPENGRAPHIFY_API_TIMEOUT` | Tope en segundos por request al backend (default 180) |
+| `OPENGRAPHIFY_CHUNK_RETRIES` | Reintentos in-run ante errores 524/429/5xx (default 2) |
+| `OPENGRAPHIFY_RETRY_WAIT` | Espera de reintento si no hay Retry-After (default 30s) |
+| `GRAPHIFY_OLLAMA_VISION` | `1` para mandar píxeles a un modelo de visión de Ollama (default: off) |
+| `OPENGRAPHIFY_DEBUG_HANG` | Si algo se cuelga: volca el stack cada N seg para diagnóstico |
+| `OPENGRAPHIFY_NO_FAST_EXIT` | `1` para volver al cierre normal del intérprete (escape hatch) |
 
 ---
 
@@ -417,6 +443,58 @@ el Ollama de IPEX-LLM y arrancarlo (incluye el troubleshooting de "`ollama list`
 
 Mientras tanto, para bajar el estrés en CPU: usá el default **3B**, `--max N` para procesar por
 tandas, y `OPENGRAPHIFY_TOKEN_BUDGET` más chico.
+</details>
+
+### 🧯 Errores, cuelgues y recuperación
+
+<details>
+<summary><b>Se queda colgado al terminar y el cursor no vuelve</b></summary>
+
+Era un cuelgue conocido cuando el backend es **remoto**: al terminar el trabajo (el grafo ya
+escrito), un socket *keep-alive* abierto trababa el cierre del intérprete **hasta ~10 min**.
+
+**Ya está resuelto:** al terminar una corrida opengraphify **fuerza un cierre limpio** y, además,
+**acota el timeout de red** a `api_timeout` (180s por defecto, contra los 600s = 10 min de
+graphify), así un request trabado falla rápido en vez de congelar todo.
+
+- Si aun así ves un cuelgue, corré con `OPENGRAPHIFY_DEBUG_HANG=1`: vuelca el *stack* del frame
+  trabado cada N segundos para diagnosticarlo.
+- `OPENGRAPHIFY_NO_FAST_EXIT=1` vuelve al cierre normal del intérprete (escape hatch).
+
+</details>
+
+<details>
+<summary><b>"chunk failed" / error 524 / timeout: ¿se perdió todo?</b></summary>
+
+**No.** Un chunk que falla (524 de Cloudflare, timeout, 5xx) se descarta **solo ese chunk**:
+vas a ver `Partial results returned` y el grafo se construye igual con **todo lo demás**.
+
+- **Se recupera solo:** los archivos del chunk fallido **no se anotan en el `manifest.json`**, así
+  que la **próxima corrida los reprocesa** (los demás quedan cacheados y se saltean).
+- **Reintento in-run:** ante un error *retryable* opengraphify espera el `Retry-After` del server
+  (o `retry_wait_seconds`) y reintenta hasta `chunk_retries` veces antes de darlo por perdido.
+- **Para menos 524** contra un backend remoto lento: bajá `token_budget` (chunks más rápidos).
+
+> `Extraction warning (N issues): Edge ... missing required field 'source_file'` es un **warning
+> cosmético** (el modelo omitió un campo en N aristas de miles). Las aristas **igual quedan en el
+> grafo** — no es un fallo y no hace falta rehacer nada.
+</details>
+
+<details>
+<summary><b>Quiero ver el grafo nodo por nodo (no agregado por comunidades)</b></summary>
+
+Cuando el grafo supera **5000 nodos**, el `graph.html` se arma como **vista agregada por
+comunidades** (si no, el navegador no aguanta 40k nodos). Para ver **nodo por nodo** usá la
+exportación **Obsidian de graphify** sobre el grafo ya generado (comparten `graphify-out/`),
+parado en el repo escaneado:
+
+```bash
+python -m graphify export obsidian
+```
+
+Genera `graphify-out/obsidian/` (un `.md` por nodo + `graph.canvas`); abrí esa carpeta como
+*vault* en Obsidian, que sí maneja decenas de miles de nodos. Ojo: `--obsidian` es un flag de
+**graphify**, opengraphify no lo expone.
 </details>
 
 ---
