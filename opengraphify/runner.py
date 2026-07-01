@@ -108,6 +108,8 @@ def run(
     *,
     force: bool = False,
     max_files: int | None = None,
+    code_only: bool = False,
+    label_clusters: bool = True,
 ) -> bool:
     """Execute one graph-update pass.
 
@@ -121,6 +123,20 @@ def run(
     bounded batches — e.g. `--max 50` — instead of one marathon pass that pins
     the CPU for hours. Already-cached files don't count against the cap, so each
     run makes `max_files` files of fresh progress.
+
+    code_only: skip the entire semantic step — no LLM/Ollama calls at all. Only
+    the AST (code) extraction runs, plus clustering/export, so the pass is fast
+    and offline. Change detection and the manifest use the AST hash (kind="ast"),
+    which *preserves* the semantic_hash of already-extracted docs — so a
+    code-only pass never forgets prior semantic work or forces a re-extraction.
+    Ideal with --watch to keep the code graph continuously fresh without heat/
+    tokens. Community labeling is skipped too (existing labels are reused).
+
+    label_clusters: whether to name communities via the LLM at the end. Always
+    True on a normal run. Set False (the plain `--code-only`) for a fully offline
+    pass. Setting it True together with code_only=True is the `--code-only-1`
+    variant: no semantic inference, but the final ~1-call-per-100-communities
+    labeling pass still runs so the clusters get real names.
     """
     root = Path(root).resolve()
     graphify_out = root / config.out_dir
@@ -143,20 +159,29 @@ def run(
     incremental = not force and manifest_path.exists() and graph_json_path.exists()
 
     if incremental:
-        print(f"[opengraphify] incremental scan of {root}")
-        detection = _detect_incremental(root, manifest_path=str(manifest_path))
+        print(f"[opengraphify] incremental scan of {root}" + (" (code-only)" if code_only else ""))
+        # code-only detects changes by AST/content hash; the normal pass detects
+        # by semantic_hash so files touched by an AST-only run get re-extracted.
+        detection = _detect_incremental(
+            root, manifest_path=str(manifest_path),
+            kind="ast" if code_only else "semantic",
+        )
         files_by_type = detection.get("files", {})
         new_by_type = detection.get("new_files", {})
         code_files = [Path(p) for p in new_by_type.get("code", [])]
         doc_files = [Path(p) for p in new_by_type.get("document", [])]
         paper_files = [Path(p) for p in new_by_type.get("paper", [])]
         image_files = [Path(p) for p in new_by_type.get("image", [])]
+        if code_only:
+            # Ignore every semantic (LLM) input this pass.
+            doc_files = paper_files = image_files = []
         deleted_files = list(detection.get("deleted_files", []))
         unchanged_total = sum(len(v) for v in detection.get("unchanged_files", {}).values())
 
         total_changed = len(code_files) + len(doc_files) + len(paper_files) + len(image_files)
         if total_changed == 0 and not deleted_files:
-            print(f"[opengraphify] graph is up to date ({unchanged_total} files unchanged)")
+            _scope = "code files" if code_only else "files"
+            print(f"[opengraphify] graph is up to date ({unchanged_total} {_scope} unchanged)")
             return False
 
         print(
@@ -165,13 +190,15 @@ def run(
             f"{unchanged_total} unchanged; {len(deleted_files)} deleted"
         )
     else:
-        print(f"[opengraphify] full scan of {root}")
+        print(f"[opengraphify] full scan of {root}" + (" (code-only)" if code_only else ""))
         detection = _detect(root)
         files_by_type = detection.get("files", {})
         code_files = [Path(p) for p in files_by_type.get("code", [])]
         doc_files = [Path(p) for p in files_by_type.get("document", [])]
         paper_files = [Path(p) for p in files_by_type.get("paper", [])]
         image_files = [Path(p) for p in files_by_type.get("image", [])]
+        if code_only:
+            doc_files = paper_files = image_files = []
         deleted_files = []
         unchanged_total = 0
         print(
@@ -179,9 +206,12 @@ def run(
             f"{len(doc_files)} docs, {len(paper_files)} papers, {len(image_files)} images"
         )
 
-    # Install in-run retry for transient backend HTTP errors before any LLM work
-    # (covers both semantic extraction and community labeling this run).
-    _install_http_retry(config)
+    # Install in-run retry for transient backend HTTP errors before any LLM work.
+    # Needed whenever an LLM call can happen this run: semantic extraction
+    # (normal run) or cluster labeling (normal run and the --code-only-1 variant).
+    # Plain --code-only never touches the LLM, so it's skipped there.
+    if (not code_only) or label_clusters:
+        _install_http_retry(config)
 
     # ------------------------------------------------------------------ #
     # 2. AST extraction on code files (no LLM)
@@ -412,30 +442,45 @@ def run(
     # ------------------------------------------------------------------ #
     labels_path = graphify_out / ".graphify_labels.json"
     community_labels: dict = {cid: f"Community {cid}" for cid in communities}
-    try:
-        from graphify.llm import (
-            BACKENDS as _LBL_BACKENDS,
-            generate_community_labels as _gen_labels,
-        )
-        # Point the labeling backend at the configured endpoint/model too.
-        _LBL_BACKENDS["ollama"]["base_url"] = config.base_url
-        _LBL_BACKENDS["ollama"]["default_model"] = config.model
-        community_labels, _lbl_src = _gen_labels(
-            G, communities, backend=config.graphify_backend(), gods=gods
-        )
-        print(
-            f"[opengraphify] community labels: {_lbl_src} "
-            f"({len(community_labels)} communities)"
-        )
-    except Exception as exc:
-        print(f"[opengraphify] WARNING: community labeling failed: {exc}", file=sys.stderr)
-    try:
-        labels_path.write_text(
-            json.dumps({str(k): v for k, v in community_labels.items()}, ensure_ascii=False),
-            encoding="utf-8",
-        )
-    except Exception as exc:
-        print(f"[opengraphify] WARNING: could not write labels: {exc}", file=sys.stderr)
+    if not label_clusters:
+        # LLM labeling disabled (plain --code-only): reuse existing community
+        # labels when present (IDs that still match keep their names), else keep
+        # placeholders. The labels file is left untouched so a prior semantic
+        # run's names survive.
+        if labels_path.exists():
+            try:
+                _raw = json.loads(labels_path.read_text(encoding="utf-8"))
+                for cid in communities:
+                    if str(cid) in _raw:
+                        community_labels[cid] = _raw[str(cid)]
+            except Exception:
+                pass
+        print(f"[opengraphify] code-only: skipping LLM labeling ({len(communities)} communities)")
+    else:
+        try:
+            from graphify.llm import (
+                BACKENDS as _LBL_BACKENDS,
+                generate_community_labels as _gen_labels,
+            )
+            # Point the labeling backend at the configured endpoint/model too.
+            _LBL_BACKENDS["ollama"]["base_url"] = config.base_url
+            _LBL_BACKENDS["ollama"]["default_model"] = config.model
+            community_labels, _lbl_src = _gen_labels(
+                G, communities, backend=config.graphify_backend(), gods=gods
+            )
+            print(
+                f"[opengraphify] community labels: {_lbl_src} "
+                f"({len(community_labels)} communities)"
+            )
+        except Exception as exc:
+            print(f"[opengraphify] WARNING: community labeling failed: {exc}", file=sys.stderr)
+        try:
+            labels_path.write_text(
+                json.dumps({str(k): v for k, v in community_labels.items()}, ensure_ascii=False),
+                encoding="utf-8",
+            )
+        except Exception as exc:
+            print(f"[opengraphify] WARNING: could not write labels: {exc}", file=sys.stderr)
 
     # ------------------------------------------------------------------ #
     # 7. Export
@@ -491,20 +536,30 @@ def run(
     # ------------------------------------------------------------------ #
     # 8. Save manifest — graphify's --update will see the graph as current
     # ------------------------------------------------------------------ #
-    _sem_extracted: set[str] = {
-        n.get("source_file", "") for n in sem_result.get("nodes", [])
-    } | {e.get("source_file", "") for e in sem_result.get("edges", [])}
-    _sem_extracted.discard("")
-    _sem_types = {"document", "paper", "image"}
-    manifest_files = {
-        ftype: [
-            f for f in flist
-            if ftype not in _sem_types or f in _sem_extracted
-        ]
-        for ftype, flist in files_by_type.items()
-    }
+    if code_only:
+        # Re-stamp only the AST hash of code files. save_manifest(kind="ast")
+        # preserves each file's existing semantic_hash (when its content is
+        # unchanged) and seeds untouched entries from the current manifest, so a
+        # code-only pass never drops already-extracted docs — no accidental full
+        # re-extraction on the next semantic run.
+        manifest_files = {ft: flist for ft, flist in files_by_type.items() if ft == "code"}
+        _manifest_kind = "ast"
+    else:
+        _sem_extracted: set[str] = {
+            n.get("source_file", "") for n in sem_result.get("nodes", [])
+        } | {e.get("source_file", "") for e in sem_result.get("edges", [])}
+        _sem_extracted.discard("")
+        _sem_types = {"document", "paper", "image"}
+        manifest_files = {
+            ftype: [
+                f for f in flist
+                if ftype not in _sem_types or f in _sem_extracted
+            ]
+            for ftype, flist in files_by_type.items()
+        }
+        _manifest_kind = "both"
     try:
-        _save_manifest(manifest_files, manifest_path=str(manifest_path), kind="both", root=root)
+        _save_manifest(manifest_files, manifest_path=str(manifest_path), kind=_manifest_kind, root=root)
     except Exception as exc:
         print(f"[opengraphify] WARNING: could not write manifest: {exc}", file=sys.stderr)
 

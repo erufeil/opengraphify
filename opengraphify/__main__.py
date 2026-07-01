@@ -146,6 +146,23 @@ def main() -> None:
         "its progress, so the next run resumes where this one left off).",
     )
     parser.add_argument(
+        "--code-only",
+        action="store_true",
+        dest="code_only",
+        help="Only extract code (AST) — skip the semantic step entirely: no LLM / "
+        "Ollama calls, fast and offline. Preserves any already-extracted semantic "
+        "data in the manifest. Combine with --watch to keep the code graph fresh "
+        "continuously without heat or tokens.",
+    )
+    parser.add_argument(
+        "--code-only-1",
+        action="store_true",
+        dest="code_only_1",
+        help="Like --code-only (no semantic inference), but still runs the final "
+        "LLM pass that names the clusters (~1 call per 100 communities). "
+        "'code-only minus 1': offline extraction, one cheap labeling burst at the end.",
+    )
+    parser.add_argument(
         "--status",
         action="store_true",
         help="Show graph status (node/edge count, pending changes) and exit",
@@ -201,12 +218,23 @@ def main() -> None:
 
     _arm_hang_watchdog()
 
+    # --code-only and --code-only-1 both skip semantic inference; --code-only-1
+    # additionally keeps the LLM cluster-labeling pass at the end.
+    _code_only = args.code_only or args.code_only_1
+    _label_clusters = (not _code_only) or args.code_only_1
+
     if args.watch:
         from opengraphify.scheduler import watch
-        watch(root, config, force_first=args.force)
+        watch(
+            root, config, force_first=args.force,
+            code_only=_code_only, label_clusters=_label_clusters,
+        )
     else:
         from opengraphify.runner import run
-        run(root, config, force=args.force, max_files=args.max_files)
+        run(
+            root, config, force=args.force, max_files=args.max_files,
+            code_only=_code_only, label_clusters=_label_clusters,
+        )
         # All outputs are on disk; skip the slow interpreter teardown that
         # otherwise hangs on a lingering keep-alive socket to Ollama.
         _fast_exit(0)

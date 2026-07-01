@@ -165,9 +165,12 @@ opengraphify . --watch         # lo mantiene actualizado en background
 opengraphify .                    # una corrida incremental (default)
 opengraphify . --max 50           # procesa 50 archivos nuevos y termina
 opengraphify . --force            # re-extracción completa (ignora caché)
+opengraphify . --code-only        # solo código (AST), sin LLM/Ollama — rápido y offline
+opengraphify . --code-only-1      # igual, pero nombra los clusters con el LLM al final
 opengraphify . --status           # estado del grafo: nodos, edges, cambios pendientes
 opengraphify . --watch            # modo daemon, cada 15 min (según config)
 opengraphify . --watch --interval 5
+opengraphify . --watch --code-only # mantiene el grafo de código fresco sin tokens ni calor
 
 # Overrides inline sin tocar el toml
 opengraphify . --model llama3.1:8b
@@ -201,6 +204,33 @@ Durante la extracción semántica vas a ver el avance **archivo por archivo**:
 > Los archivos se procesan en *chunks* paralelos, así que las líneas aparecen en ráfagas
 > (varios archivos de golpe cada vez que un chunk del modelo responde). El caché se guarda
 > **después de cada chunk**, así que un corte (o un apagón térmico) es recuperable.
+
+### ⚡ Modo solo-código (`--code-only`)
+
+Salta **por completo** la etapa semántica: **cero llamadas al LLM/Ollama**. Solo corre la
+extracción AST del **código** (funciones, clases, llamadas, imports) + clustering + export.
+Es rápido, offline, y no calienta la máquina.
+
+```bash
+opengraphify . --code-only            # una pasada, solo código (100% offline)
+opengraphify . --code-only-1          # igual, pero nombra los clusters con el LLM al final
+opengraphify . --watch --code-only    # mantiene el grafo de código fresco en background
+```
+
+- **No pierde tu trabajo semántico.** La detección de cambios y el manifest usan el hash de
+  código (`kind="ast"`), que **preserva** el `semantic_hash` de los docs ya extraídos. Así, una
+  pasada solo-código **nunca olvida** lo semántico ni fuerza una re-extracción después.
+- **`--code-only`** no etiqueta comunidades con IA (reusa las etiquetas existentes si las hay, si
+  no, `Community N`). **`--code-only-1`** hace lo mismo pero **sí** corre el paso final de
+  etiquetado por LLM (~1 llamada cada 100 comunidades) para que los clusters tengan nombres reales
+  — "solo-código *menos 1*". El resto (extracción del código) sigue siendo offline en ambos.
+- **Ideal con `--watch`:** mantené el grafo del código al día de forma continua sin gastar tokens
+  ni recalentar; cuando quieras, corré una pasada normal (`opengraphify .`) para completar la
+  parte semántica de los docs/imágenes que cambiaron.
+
+> En un repo de **puro código** el resultado es idéntico a una corrida normal (esa nunca llama al
+> modelo igual). `--code-only` brilla cuando el repo **también** tiene docs/imágenes pero querés
+> refrescar solo el código, barato y al instante.
 
 ### Como servicio en background (Windows)
 
