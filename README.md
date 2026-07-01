@@ -205,6 +205,12 @@ Durante la extracción semántica vas a ver el avance **archivo por archivo**:
 > (varios archivos de golpe cada vez que un chunk del modelo responde). El caché se guarda
 > **después de cada chunk**, así que un corte (o un apagón térmico) es recuperable.
 
+> 🐘 **Árboles enormes (decenas de miles de archivos, ej. el kernel de Linux):** el *primer*
+> escaneo camina todo el árbol y puede tardar varios minutos (a partir de ahí las corridas
+> incrementales son rápidas). Para que no parezca colgado, opengraphify muestra un latido con el
+> conteo en vivo: `scanning files... 12,340 files scanned (24s)`. Consejo: en vez de grafear un
+> repo gigante entero, apuntá a un **subdirectorio/subsistema** (`opengraphify ./fs/ext4 --code-only`).
+
 ### ⚡ Modo solo-código (`--code-only`)
 
 Salta **por completo** la etapa semántica: **cero llamadas al LLM/Ollama**. Solo corre la

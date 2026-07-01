@@ -102,6 +102,83 @@ def _install_http_retry(config: Config) -> None:
         setattr(_llm, fname, _wrap(fn))
 
 
+def _scan_counter():
+    """Monkeypatch graphify.detect.classify_file to count files as they are
+    scanned. Returns ``(counter, restore)`` where ``counter["n"]`` climbs during
+    detect()/detect_incremental() (both call classify_file once per file).
+
+    graphify is re-cloned on update, so this lives here. Best-effort: if the
+    symbol can't be patched, returns a counter that stays at 0 and the heartbeat
+    simply falls back to showing elapsed time.
+    """
+    counter = {"n": 0}
+    try:
+        from graphify import detect as _d
+        orig = _d.classify_file
+    except Exception:
+        return counter, (lambda: None)
+    import functools
+
+    @functools.wraps(orig)
+    def _counting(path):
+        counter["n"] += 1
+        return orig(path)
+
+    _d.classify_file = _counting
+
+    def _restore():
+        try:
+            _d.classify_file = orig
+        except Exception:
+            pass
+
+    return counter, _restore
+
+
+def _with_heartbeat(label: str, fn, *, every: float = 8.0, counter: dict | None = None):
+    """Run blocking ``fn()`` in a thread, printing a progress heartbeat.
+
+    graphify's detect()/detect_incremental() are single blocking calls with no
+    progress callback. On a huge tree (e.g. the Linux kernel, ~80k files) the
+    initial full walk can take 15-20 min, and with nothing printed between
+    "ready" and "found N files" it looks frozen. This prints a heartbeat every
+    ``every`` seconds — including the live file count from ``counter`` when
+    given — so a long scan is visibly alive. Small repos finish before the first
+    tick, so there's no noise.
+    """
+    import threading
+
+    box: dict = {}
+    done = threading.Event()
+
+    def _worker():
+        try:
+            box["value"] = fn()
+        except BaseException as exc:  # noqa: BLE001 — re-raised on the main thread
+            box["error"] = exc
+        finally:
+            done.set()
+
+    th = threading.Thread(target=_worker, daemon=True)
+    t0 = time.time()
+    th.start()
+    while not done.wait(timeout=every):
+        elapsed = int(time.time() - t0)
+        if counter is not None:
+            print(
+                f"[opengraphify] {label}... {counter['n']:,} files scanned ({elapsed}s)",
+                flush=True,
+            )
+        else:
+            print(
+                f"[opengraphify] {label}... {elapsed}s elapsed (working, not frozen)",
+                flush=True,
+            )
+    if "error" in box:
+        raise box["error"]
+    return box.get("value")
+
+
 def run(
     root: Path,
     config: Config,
@@ -162,10 +239,18 @@ def run(
         print(f"[opengraphify] incremental scan of {root}" + (" (code-only)" if code_only else ""))
         # code-only detects changes by AST/content hash; the normal pass detects
         # by semantic_hash so files touched by an AST-only run get re-extracted.
-        detection = _detect_incremental(
-            root, manifest_path=str(manifest_path),
-            kind="ast" if code_only else "semantic",
-        )
+        _scan_ctr, _scan_restore = _scan_counter()
+        try:
+            detection = _with_heartbeat(
+                "scanning (incremental)",
+                lambda: _detect_incremental(
+                    root, manifest_path=str(manifest_path),
+                    kind="ast" if code_only else "semantic",
+                ),
+                counter=_scan_ctr,
+            )
+        finally:
+            _scan_restore()
         files_by_type = detection.get("files", {})
         new_by_type = detection.get("new_files", {})
         code_files = [Path(p) for p in new_by_type.get("code", [])]
@@ -191,7 +276,13 @@ def run(
         )
     else:
         print(f"[opengraphify] full scan of {root}" + (" (code-only)" if code_only else ""))
-        detection = _detect(root)
+        _scan_ctr, _scan_restore = _scan_counter()
+        try:
+            detection = _with_heartbeat(
+                "scanning files", lambda: _detect(root), counter=_scan_ctr,
+            )
+        finally:
+            _scan_restore()
         files_by_type = detection.get("files", {})
         code_files = [Path(p) for p in files_by_type.get("code", [])]
         doc_files = [Path(p) for p in files_by_type.get("document", [])]
