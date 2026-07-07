@@ -225,6 +225,8 @@ graphify-out/
 
 # Documentos de contexto para IA (diseño/notas, no necesarios para ejecutar)
 CLAUDE*
+.claude
+.claude/*
 
 # Archivos sueltos que no son del proyecto
 *.xlsx
