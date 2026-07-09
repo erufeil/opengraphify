@@ -29,13 +29,15 @@ ese trabajo a un modelo **local (gratis) o barato** → **tokens baratos**. Cuan
 revisa el grafo, ve que ya está al día y **no procesa nada**. El modelo principal queda libre.
 
 ```text
-                       ┌─────────────── tokens CAROS ───────────────┐
-   graphify (skill)  →  modelo de Claude Code procesa el grafo
+                       ┌─────────────── tokens CAROS ────────────────┐
+                       | graphify (skill)  →  modelo de Claude Code  |
+                       |                          procesa el grafo   |
                        └─────────────────────────────────────────────┘
 
-                       ┌─────────────── tokens BARATOS ─────────────┐
-   opengraphify (worker) → Ollama / OpenRouter procesa el grafo
-                            graphify ve el grafo al día → no hace nada
+                       ┌─────────────── tokens BARATOS ──────────────┐
+                       | opengraphify (worker) → Ollama / OpenRouter |
+                       |                            procesa el grafo |
+                       | graphify ve el grafo al día → no hace nada  |
                        └─────────────────────────────────────────────┘
 ```
 
