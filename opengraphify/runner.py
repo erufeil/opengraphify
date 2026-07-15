@@ -115,6 +115,54 @@ def _provider_routing_extra_body(config: Config) -> dict:
     return {"provider": {"sort": "throughput"}} if config.nitro else {}
 
 
+def _reasoning_effort_none() -> dict:
+    """OpenRouter's own reasoning-control field.
+
+    NOT graphify's ``{"thinking": {"type": "disabled"}}`` convention — that one
+    is aimed at Moonshot/DeepSeek's *native* APIs and is a silent no-op when the
+    request actually goes through OpenRouter's gateway (OpenRouter normalizes
+    reasoning control across providers via its own ``reasoning`` field instead).
+    ``effort: "none"`` asks it to skip the model's chain-of-thought entirely. A
+    provider with mandatory reasoning may reject this outright — callers here
+    already fall back gracefully (placeholder labels / a logged warning) so
+    that's a no-worse-than-today outcome, not a new failure mode.
+    """
+    return {"reasoning": {"effort": "none"}}
+
+
+def _cap_chunk_file_count(chunks: "list[list]", max_files: int) -> "list[list]":
+    """Re-split any chunk longer than max_files into smaller chunks, in order.
+
+    graphify's own chunk packer (_pack_chunks_by_tokens) only bounds chunks by
+    token budget, not by how many separate documents they contain. A chunk can
+    fit the token budget easily while still holding more discrete files than a
+    small model can reliably track in one completion (#reenvio — see the
+    coverage-retry loop in run()). This is the second, file-count dimension on
+    top of that packing.
+    """
+    capped: "list[list]" = []
+    for chunk in chunks:
+        if len(chunk) <= max_files:
+            capped.append(chunk)
+        else:
+            capped.extend(chunk[i:i + max_files] for i in range(0, len(chunk), max_files))
+    return capped
+
+
+def _disable_thinking_via_env() -> bool:
+    """Opt-in: GRAPHIFY_DISABLE_THINKING=1 also turns off reasoning for the
+    *extraction* call when routed through OpenRouter (see _reasoning_effort_none).
+    graphify itself only honours this env var for its own native-API `thinking`
+    convention, which does nothing over OpenRouter — this re-reads the same var
+    so the documented opt-in still has an effect on this backend. Unlike
+    labeling, extraction does NOT get this by default: graphify's own docs note
+    disabling reasoning trades rare empty-content failures for more frequent
+    (benign) truncation and measurably lower extraction coverage, so it stays a
+    deliberate user choice, not a forced default.
+    """
+    return os.environ.get("GRAPHIFY_DISABLE_THINKING", "").strip().lower() in ("1", "true", "yes", "on")
+
+
 def _scan_counter():
     """Monkeypatch graphify.detect.classify_file to count files as they are
     scanned. Returns ``(counter, restore)`` where ``counter["n"]`` climbs during
@@ -393,47 +441,11 @@ def run(
                 f"via {backend} ({config.model}), token_budget={config.token_budget:,}..."
             )
 
-            # Files are LLM-processed in parallel chunks (one request per chunk,
-            # packed by token budget + directory). Pre-compute the same chunk plan
-            # graphify uses so we can report which files each chunk covers; per-file
-            # lines therefore appear in bursts as each chunk completes.
+            # Files are LLM-processed in chunks packed by token budget + directory.
+            # token_budget alone doesn't cap how many *separate documents* land in
+            # one chunk, though — see the coverage-retry loop below.
             _TOKEN_BUDGET = config.token_budget
-            chunks = [uncached_pathobjs]
-            if _pack_chunks is not None:
-                try:
-                    chunks = _pack_chunks(uncached_pathobjs, token_budget=_TOKEN_BUDGET)
-                except Exception:
-                    chunks = [uncached_pathobjs]
-
             progress = {"done": 0}
-
-            def _on_chunk(idx: int, total: int, _r: dict) -> None:
-                # Persist this chunk's results to the semantic cache immediately.
-                # save_semantic_cache is keyed per source_file, so writing a chunk
-                # at a time is correct and makes the run crash-recoverable: if the
-                # machine dies (e.g. a thermal shutdown) mid-corpus, every chunk
-                # completed so far is already cached and the next run resumes from
-                # where it stopped instead of re-processing everything (#cache).
-                try:
-                    _save_cache(
-                        _r.get("nodes", []),
-                        _r.get("edges", []),
-                        _r.get("hyperedges", []),
-                        root=root,
-                    )
-                except Exception as exc:
-                    print(
-                        f"[opengraphify] WARNING: could not cache chunk {idx + 1}/{total}: {exc}",
-                        file=sys.stderr,
-                    )
-                chunk_files = chunks[idx] if idx < len(chunks) else []
-                for f in chunk_files:
-                    progress["done"] += 1
-                    print(
-                        f"[opengraphify] semantic extraction on {Path(f).name} "
-                        f"({progress['done']}/{n_total})",
-                        flush=True,
-                    )
 
             # Force valid JSON output for small local models (they otherwise
             # reply in prose, which graphify can't parse). This goes through the
@@ -454,6 +466,12 @@ def run(
                     f"[opengraphify] forcing JSON output (num_ctx={_num_ctx:,}, "
                     f"max_retry_depth={config.max_retry_depth})"
                 )
+            if config.provider == "openrouter" and _disable_thinking_via_env():
+                _extraction_extra.update(_reasoning_effort_none())
+                print(
+                    "[opengraphify] GRAPHIFY_DISABLE_THINKING: asking OpenRouter to skip "
+                    "reasoning for extraction (trades away some coverage/quality)"
+                )
             if config.nitro:
                 print(
                     "[opengraphify] nitro: routing to the fastest OpenRouter provider "
@@ -461,17 +479,123 @@ def run(
                 )
             if _extraction_extra:
                 _BACKENDS["ollama"]["extra_body"] = _extraction_extra
+            fresh: dict = {
+                "nodes": [], "edges": [], "hyperedges": [],
+                "input_tokens": 0, "output_tokens": 0,
+            }
             try:
-                fresh = _extract_corpus_parallel(
-                    uncached_pathobjs,
-                    backend=backend,
-                    api_key=api_key,
-                    model=config.model,
-                    root=root,
-                    token_budget=_TOKEN_BUDGET,
-                    max_retry_depth=config.max_retry_depth,
-                    on_chunk_done=_on_chunk,
-                )
+                # Coverage-retry loop (#reenvio): a chunk can come back with a
+                # clean, valid response that simply omits some of the files it was
+                # given — graphify's own extract_corpus_parallel already detects
+                # this (fresh["uncovered_files"], #1890) but still leaves those
+                # files unprocessed for the run. If a chunk of N files came back
+                # with nodes for only n < N of them, that's the model's demonstrated
+                # per-call attention ceiling: shrink the chunk plan to at most n
+                # files and resend just the dropped ones. Repeats (capped at 4
+                # rounds) since a smaller chunk can still overflow a weak model.
+                # A *single*-file chunk with no coverage isn't an attention
+                # problem — it's a genuinely content-less file — so it's left
+                # dropped for the next run exactly like today, not requeued here.
+                worklist: list = uncached_pathobjs
+                max_files_per_chunk: int | None = None
+                for _round in range(4):
+                    if not worklist:
+                        break
+                    round_chunks = [worklist]
+                    if _pack_chunks is not None:
+                        try:
+                            round_chunks = _pack_chunks(worklist, token_budget=_TOKEN_BUDGET)
+                        except Exception:
+                            round_chunks = [worklist]
+                    if max_files_per_chunk is not None:
+                        round_chunks = _cap_chunk_file_count(round_chunks, max_files_per_chunk)
+
+                    round_uncovered: list = []
+                    worst_n: int | None = None
+                    # One _extract_corpus_parallel call per chunk here (rather than
+                    # one call for the whole round) so our file-count cap actually
+                    # sticks — passed the full worklist, it would just re-pack by
+                    # token budget alone internally and undo the cap. opengraphify
+                    # always dispatches through the "ollama" backend slot, which
+                    # extract_corpus_parallel already forces serial (max_concurrency
+                    # = 1), so this loses no parallelism it wasn't already forgoing.
+                    for chunk_files in round_chunks:
+                        def _on_chunk(
+                            idx: int, total: int, _r: dict,
+                            _chunk_files=chunk_files, _r_idx=_round,
+                        ) -> None:
+                            # Persist immediately: crash-recoverable, same reasoning
+                            # as before (#cache).
+                            try:
+                                _save_cache(
+                                    _r.get("nodes", []),
+                                    _r.get("edges", []),
+                                    _r.get("hyperedges", []),
+                                    root=root,
+                                )
+                            except Exception as exc:
+                                print(
+                                    f"[opengraphify] WARNING: could not cache chunk: {exc}",
+                                    file=sys.stderr,
+                                )
+                            for f in _chunk_files:
+                                if _r_idx == 0:
+                                    # First pass: keep today's exact "(i/n_total)" format.
+                                    progress["done"] += 1
+                                    print(
+                                        f"[opengraphify] semantic extraction on {Path(f).name} "
+                                        f"({progress['done']}/{n_total})",
+                                        flush=True,
+                                    )
+                                else:
+                                    # A retry re-sends a file already counted once in
+                                    # round 0 — labeling it "(i/n_total)" again would
+                                    # make the running count exceed n_total.
+                                    print(
+                                        f"[opengraphify] retrying semantic extraction on "
+                                        f"{Path(f).name} (round {_r_idx + 1})",
+                                        flush=True,
+                                    )
+
+                        chunk_result = _extract_corpus_parallel(
+                            chunk_files,
+                            backend=backend,
+                            api_key=api_key,
+                            model=config.model,
+                            root=root,
+                            token_budget=_TOKEN_BUDGET,
+                            max_retry_depth=config.max_retry_depth,
+                            on_chunk_done=_on_chunk,
+                        )
+                        fresh["nodes"].extend(chunk_result.get("nodes", []))
+                        fresh["edges"].extend(chunk_result.get("edges", []))
+                        fresh["hyperedges"].extend(chunk_result.get("hyperedges", []))
+                        fresh["input_tokens"] += chunk_result.get("input_tokens", 0)
+                        fresh["output_tokens"] += chunk_result.get("output_tokens", 0)
+
+                        uncovered_str = chunk_result.get("uncovered_files") or []
+                        if uncovered_str and len(chunk_files) > 1:
+                            _uncovered_resolved = {Path(p).resolve() for p in uncovered_str}
+                            _dropped = [f for f in chunk_files if Path(f).resolve() in _uncovered_resolved]
+                            if _dropped:
+                                n_covered = len(chunk_files) - len(_dropped)
+                                worst_n = n_covered if worst_n is None else min(worst_n, n_covered)
+                                round_uncovered.extend(_dropped)
+
+                    if not round_uncovered:
+                        break
+                    max_files_per_chunk = (
+                        max(1, worst_n) if max_files_per_chunk is None
+                        else min(max_files_per_chunk, max(1, worst_n))
+                    )
+                    print(
+                        f"[opengraphify] {len(round_uncovered)} file(s) came back with no "
+                        f"nodes this round — the model only completed {max_files_per_chunk} "
+                        "of a larger batch, so that's now the max files per chunk; "
+                        "retrying the rest"
+                    )
+                    worklist = round_uncovered
+
                 try:
                     _save_cache(
                         fresh.get("nodes", []),
@@ -590,11 +714,32 @@ def run(
             # graphify's own small per-batch cap applies, then restore it after in
             # case anything later in this process still wants the extraction value.
             _prev_max_out = os.environ.pop("GRAPHIFY_MAX_OUTPUT_TOKENS", None)
+            # _call_openai_compat (extraction) zeroes the SDK's own retry count for
+            # backend "ollama" on purpose: 6 silent SDK-level retries x api_timeout
+            # can turn one wedged call into a ~21min block before anything raises
+            # for graphify's/opengraphify's own retry-or-skip logic to see (graphify
+            # calls this out explicitly, #1686). _call_llm (labeling) has no such
+            # guard, so it's still exposed to that. Apply the same zero-retry
+            # default here — scoped, and only when the user hasn't explicitly set
+            # GRAPHIFY_MAX_RETRIES themselves (their choice always wins).
+            _prev_max_retries = os.environ.get("GRAPHIFY_MAX_RETRIES")
+            if not (_prev_max_retries or "").strip():
+                os.environ["GRAPHIFY_MAX_RETRIES"] = "0"
             # Labeling gets the same nitro routing hint as extraction — it's a
             # separate BACKENDS["ollama"]["extra_body"] scope (restored below),
             # not the one extraction just put back to _prev_extra above.
             _prev_lbl_extra = _LBL_BACKENDS["ollama"].get("extra_body")
-            _lbl_extra = _provider_routing_extra_body(config)
+            _lbl_extra = dict(_provider_routing_extra_body(config))
+            if config.provider == "openrouter":
+                # Unconditional (unlike extraction's opt-in): a reasoning model
+                # can spend the whole small per-batch budget on hidden thinking
+                # and return empty content, failing the entire batch to
+                # placeholders (observed on nemotron-3-nano-30b-a3b). Naming a
+                # cluster in 2-5 words has no accuracy upside from reasoning, so
+                # there's no coverage/quality tradeoff to weigh here the way
+                # there is for extraction — mirrors graphify's own unconditional
+                # thinking-disable for kimi-k2.6, same rationale.
+                _lbl_extra.update(_reasoning_effort_none())
             if _lbl_extra:
                 _LBL_BACKENDS["ollama"]["extra_body"] = _lbl_extra
             try:
@@ -604,6 +749,10 @@ def run(
             finally:
                 if _prev_max_out is not None:
                     os.environ["GRAPHIFY_MAX_OUTPUT_TOKENS"] = _prev_max_out
+                if _prev_max_retries is None:
+                    os.environ.pop("GRAPHIFY_MAX_RETRIES", None)
+                elif not _prev_max_retries.strip():
+                    os.environ["GRAPHIFY_MAX_RETRIES"] = _prev_max_retries
                 if _lbl_extra:
                     _LBL_BACKENDS["ollama"]["extra_body"] = _prev_lbl_extra
             print(
