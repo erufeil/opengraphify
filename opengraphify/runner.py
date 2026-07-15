@@ -5,6 +5,7 @@ import json
 import os
 import sys
 import time
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 from opengraphify.config import Config
@@ -512,18 +513,13 @@ def run(
 
                     round_uncovered: list = []
                     worst_n: int | None = None
+
                     # One _extract_corpus_parallel call per chunk here (rather than
                     # one call for the whole round) so our file-count cap actually
                     # sticks — passed the full worklist, it would just re-pack by
-                    # token budget alone internally and undo the cap. opengraphify
-                    # always dispatches through the "ollama" backend slot, which
-                    # extract_corpus_parallel already forces serial (max_concurrency
-                    # = 1), so this loses no parallelism it wasn't already forgoing.
-                    for chunk_files in round_chunks:
-                        def _on_chunk(
-                            idx: int, total: int, _r: dict,
-                            _chunk_files=chunk_files, _r_idx=_round,
-                        ) -> None:
+                    # token budget alone internally and undo the cap.
+                    def _dispatch_chunk(chunk_files: list, _r_idx=_round) -> dict:
+                        def _on_chunk(idx: int, total: int, _r: dict, _chunk_files=chunk_files) -> None:
                             # Persist immediately: crash-recoverable, same reasoning
                             # as before (#cache).
                             try:
@@ -541,6 +537,10 @@ def run(
                             for f in _chunk_files:
                                 if _r_idx == 0:
                                     # First pass: keep today's exact "(i/n_total)" format.
+                                    # progress["done"] is shared across concurrent
+                                    # dispatches when ollama_parallel > 1, but +=1 on a
+                                    # dict entry under the GIL is safe here — no lock
+                                    # needed for this simple counter.
                                     progress["done"] += 1
                                     print(
                                         f"[opengraphify] semantic extraction on {Path(f).name} "
@@ -557,7 +557,7 @@ def run(
                                         flush=True,
                                     )
 
-                        chunk_result = _extract_corpus_parallel(
+                        return _extract_corpus_parallel(
                             chunk_files,
                             backend=backend,
                             api_key=api_key,
@@ -567,6 +567,19 @@ def run(
                             max_retry_depth=config.max_retry_depth,
                             on_chunk_done=_on_chunk,
                         )
+
+                    # Concurrency is opengraphify's own here (not graphify's — see
+                    # _dispatch_chunk's docstring above on why each call only ever
+                    # holds one chunk internally). config.ollama_parallel also
+                    # exports GRAPHIFY_OLLAMA_PARALLEL=1 (see apply_env) so this
+                    # matches whatever ceiling the user set for the backend.
+                    if config.ollama_parallel > 1 and len(round_chunks) > 1:
+                        with ThreadPoolExecutor(max_workers=config.ollama_parallel) as pool:
+                            chunk_results = list(pool.map(_dispatch_chunk, round_chunks))
+                    else:
+                        chunk_results = [_dispatch_chunk(c) for c in round_chunks]
+
+                    for chunk_files, chunk_result in zip(round_chunks, chunk_results):
                         fresh["nodes"].extend(chunk_result.get("nodes", []))
                         fresh["edges"].extend(chunk_result.get("edges", []))
                         fresh["hyperedges"].extend(chunk_result.get("hyperedges", []))
@@ -744,7 +757,8 @@ def run(
                 _LBL_BACKENDS["ollama"]["extra_body"] = _lbl_extra
             try:
                 community_labels, _lbl_src = _gen_labels(
-                    G, communities, backend=config.graphify_backend(), gods=gods
+                    G, communities, backend=config.graphify_backend(), gods=gods,
+                    max_concurrency=config.ollama_parallel,
                 )
             finally:
                 if _prev_max_out is not None:

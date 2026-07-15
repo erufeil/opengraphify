@@ -79,6 +79,20 @@ class Config:
     # noticeably more per token on pricier models. No effect on a literal Ollama
     # backend (the field is simply ignored there). Off by default (opt-in).
     nitro: bool = False
+    # How many chunk/label requests graphify may have in flight at once.
+    # graphify hardcodes serial (1) for the "ollama" backend slot regardless of
+    # what's passed here — literal local Ollama serves one request at a time
+    # per loaded model, and parallel batches there cause VRAM pressure and
+    # hollow replies (graphify #798). Values > 1 are honoured only once
+    # GRAPHIFY_OLLAMA_PARALLEL=1 is also set (apply_env does this automatically
+    # whenever this is > 1) — an explicit opt-in because that "ollama" slot is
+    # what OpenRouter routes through too in this project, where the VRAM
+    # concern doesn't apply but a literal local Ollama server's own concurrent-
+    # request/VRAM limits still do. Keep this at or below whatever the actual
+    # backend can sustain: for a shared local Ollama server also holding other
+    # models loaded, that's usually much less than a bare GPU/model VRAM
+    # calculation alone would suggest. 1 = serial (default, safest).
+    ollama_parallel: int = 1
 
     def apply_env(self) -> None:
         """Set env vars consumed by graphify.llm BEFORE those modules are imported.
@@ -100,6 +114,12 @@ class Config:
         # freezing the run for graphify's 600s default. setdefault so an explicit
         # GRAPHIFY_API_TIMEOUT from the user always wins.
         os.environ.setdefault("GRAPHIFY_API_TIMEOUT", str(self.api_timeout))
+        # Unlock graphify's own concurrency gate for the "ollama" backend slot
+        # (see ollama_parallel's docstring) whenever a concurrency > 1 was
+        # requested. setdefault: an explicit GRAPHIFY_OLLAMA_PARALLEL from the
+        # user always wins over this derived value.
+        if self.ollama_parallel > 1:
+            os.environ.setdefault("GRAPHIFY_OLLAMA_PARALLEL", "1")
 
     def graphify_backend(self) -> str:
         """Return the graphify backend name. All providers use the ollama slot."""
@@ -249,6 +269,15 @@ def load_config(root: Path, config_path: str | None = None) -> Config:
         )
     except (ValueError, TypeError):
         pass
+    try:
+        config.ollama_parallel = int(
+            os.environ.get(
+                "OPENGRAPHIFY_OLLAMA_PARALLEL",
+                extraction.get("ollama_parallel", config.ollama_parallel),
+            )
+        )
+    except (ValueError, TypeError):
+        pass
 
     print(
         f"[opengraphify]   model={config.model}  "
@@ -257,6 +286,7 @@ def load_config(root: Path, config_path: str | None = None) -> Config:
         f"max_retry_depth={config.max_retry_depth}  "
         f"api_timeout={config.api_timeout:g}s  "
         f"chunk_retries={config.chunk_retries}  "
-        f"nitro={config.nitro}"
+        f"nitro={config.nitro}  "
+        f"ollama_parallel={config.ollama_parallel}"
     )
     return config

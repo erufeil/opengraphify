@@ -294,6 +294,7 @@ max_retry_depth    = 1      # reintentos por bisección en chunks vacíos/fallid
 api_timeout        = 180    # tope (seg) por request; corta un cuelgue de red (graphify default: 600 = 10 min)
 chunk_retries      = 2      # reintentos in-run ante errores transitorios (524/429/5xx); 0 = ninguno
 retry_wait_seconds = 30     # espera entre reintentos si el server no manda Retry-After (el 524 sí lo manda)
+ollama_parallel    = 1      # requests simultáneos a la LLM (1 = serial, default). Ver "⚡ Paralelismo" abajo
 ```
 
 ### Usar OpenRouter en lugar de Ollama
@@ -304,6 +305,11 @@ provider = "openrouter"
 model    = "mistralai/mistral-7b-instruct"
 base_url = "https://openrouter.ai/api/v1"
 api_key  = "sk-or-..."
+# Elige el proveedor de OpenRouter más rápido para este modelo en vez del más
+# barato (por defecto OpenRouter balancea por precio). Sube el costo por
+# token; no hace nada contra un Ollama local literal. Ver "⚡ Paralelismo" abajo
+# para la diferencia entre esto y correr requests en simultáneo.
+nitro    = false
 ```
 
 ### Variables de entorno (override sin tocar el toml)
@@ -323,6 +329,8 @@ api_key  = "sk-or-..."
 | `GRAPHIFY_OLLAMA_VISION` | `1` para mandar píxeles a un modelo de visión de Ollama (default: off) |
 | `OPENGRAPHIFY_DEBUG_HANG` | Si algo se cuelga: volca el stack cada N seg para diagnóstico |
 | `OPENGRAPHIFY_NO_FAST_EXIT` | `1` para volver al cierre normal del intérprete (escape hatch) |
+| `OPENGRAPHIFY_NITRO` | `1` para priorizar velocidad sobre costo en OpenRouter (`provider.sort=throughput`) |
+| `OPENGRAPHIFY_OLLAMA_PARALLEL` | Cuántos requests simultáneos a la LLM (default 1 = serial). Ver "⚡ Paralelismo" |
 
 ---
 
@@ -366,6 +374,111 @@ Re-clona graphify y opengraphify desde GitHub (última versión) y los reinstala
 > El default es el **3B** porque es seguro en CPU/iGPU. El **7B** entrega bastante mejor
 > calidad de extracción; si tu hardware lo aguanta (idealmente GPU), subilo en el toml. Para
 > correr el 7B acelerado por una **iGPU Intel Arc**, ver **[README-GPU.md](README-GPU.md)**.
+
+---
+
+## ⚡ Paralelismo: cuántos requests simultáneos aguanta tu setup
+
+Hay **dos variables distintas** que suelen confundirse porque tienen nombres parecidos. Antes
+de tocar cualquiera de las dos, conviene tener claro cuál controla qué:
+
+| Variable | Quién la lee | Qué controla | Dónde se setea |
+| --- | --- | --- | --- |
+| `OLLAMA_NUM_PARALLEL` | El **servidor** Ollama (`ollama serve`) | Cuántos *slots* de generación reserva el server para un modelo cargado | Variable de entorno **del sistema donde corre el servicio Ollama** — requiere **reiniciar el servicio** para tomar efecto. `opengraphify.toml` no puede tocarla: no es su proceso. |
+| `ollama_parallel` (toml) / `OPENGRAPHIFY_OLLAMA_PARALLEL` (env) | El **cliente** (opengraphify/graphify) | Cuántos requests HTTP dispara opengraphify **en simultáneo** hacia ese servidor | `opengraphify.toml`, sección `[extraction]` |
+
+Ninguna de las dos alcanza sola: si el servidor permite 4 *slots* pero el cliente sigue
+mandando de a uno (`ollama_parallel = 1`, el default), nunca vas a tener más de un request en
+vuelo. Y si el cliente manda 4 a la vez pero el servidor solo tiene 1 *slot*, Ollama encola los
+otros 3 — no hay error, pero tampoco hay ganancia real.
+
+`ollama_parallel > 1` en el toml hace dos cosas automáticamente: exporta
+`GRAPHIFY_OLLAMA_PARALLEL=1` (el gate que usa graphify internamente — por defecto fuerza serial
+para el slot "ollama", justamente para no repetir el problema de abajo) y le pasa ese número
+como techo de concurrencia real a extracción y labeling.
+
+### El motivo del default serial
+
+graphify fuerza `max_concurrency=1` para el backend "ollama" por una razón medida, no por
+paranoia: un Ollama local sirve **un request a la vez por modelo cargado** salvo que
+explícitamente le habilites *slots* paralelos, y mandarle varios sin ese permiso server-side
+produce **presión de VRAM y respuestas huecas** (graphify issue #798). Por eso subir
+`ollama_parallel` en el toml sin haber configurado `OLLAMA_NUM_PARALLEL` en el servidor no hace
+nada malo, pero tampoco hace nada útil.
+
+### Caso real: 3090 (24GB) sirviendo 3 modelos a la vez
+
+Este es el análisis para un Ollama local que mantiene cargados simultáneamente
+`qwen2.5-coder:7b` (extracción de opengraphify), `gemma3:4b` (otro uso) y `nomic-embed-text`
+(embeddings para RAG) — el **peor caso**, todos residentes a la vez.
+
+**Por qué importa la distinción cliente/servidor acá:** los pesos de cada modelo se cargan
+**una sola vez** en VRAM sin importar cuántos requests en paralelo le mandes — lo único que
+escala con la concurrencia es la **KV-cache** (la memoria de contexto activo) de cada request
+en vuelo, más un margen chico de buffers de cómputo.
+
+| Modelo | Peso en VRAM (Q4, tal cual lo baja Ollama) | KV-cache por token | KV-cache a ~14k de contexto (1 slot) |
+| --- | --- | --- | --- |
+| `qwen2.5-coder:7b` | ~6 GB | ~56 KB/token (28 capas, GQA 4 KV-heads, head_dim 128 — calculado del config real) | ~0,79 GB |
+| `gemma3:4b` | ~3,3 GB | ~129 KB/token (**aproximado**, derivado de las cifras públicas de VRAM-vs-contexto de Gemma 3 4B, no de un cálculo capa-por-capa — Gemma 3 intercala 5:1 capas de atención local/global, así que el costo real por capa varía) | ~1,82 GB |
+| `nomic-embed-text` | ~0,27 GB | Insignificante — es un encoder, un solo forward pass sin generación autoregresiva, no acumula KV-cache | ~0,05-0,1 GB fijo |
+
+Con los tres cargados en reposo: `6 + 3,3 + 0,27 ≈ 9,6 GB` de 24GB, antes de sumar ningún slot
+paralelo. Quedan **~14,4 GB libres** de entrada.
+
+| `ollama_parallel` (qwen y gemma a la vez) | VRAM total estimada (peor caso, 3 modelos + N slots cada uno) | Margen sobre 24GB |
+| --- | --- | --- |
+| 1 (serial, default) | ~11,2 GB | ~12,8 GB — muy holgado |
+| **2** | ~15,8 GB | ~8,2 GB — holgado |
+| 3 | ~18,4 GB | ~5,6 GB — ajustado pero razonable |
+| 4 | ~21,0 GB | ~3,0 GB — arriesgado sin medir antes |
+
+**Conclusión para este caso:** con los 3 modelos residentes, `ollama_parallel = 2` (el default
+que dejamos en el toml de este perfil) tiene margen de sobra — no hacía falta ser tan
+conservador. `3` también entra cómodo. `4` ya empieza a comerse el colchón de golpe si además
+el sistema operativo o Ollama reservan buffers extra — ahí sí conviene medir antes de confiar
+en la cuenta de arriba.
+
+> ⚠️ Estos números asumen que **ambos modelos generativos usan un contexto similar (~14k)**. Si
+> `gemma3:4b` lo usás con un contexto mucho más chico (charla corta) o mucho más grande, su
+> columna de KV-cache cambia proporcional al contexto real, no al de este ejemplo.
+>
+> 💡 En la práctica, Ollama **descarga modelos inactivos** después de `OLLAMA_KEEP_ALIVE`
+> (5 min por defecto) — el "peor caso" de los 3 juntos solo se da si los estás usando a los
+> tres dentro de esa ventana. Fuera de eso, la VRAM real usada suele ser bastante menor a la
+> tabla de arriba.
+
+### Configurar el lado servidor (Ollama)
+
+En la máquina donde corre `ollama serve` (no en el `opengraphify.toml` — ese es el cliente):
+
+```powershell
+# Windows: variable de entorno de sistema (no de sesión), después reiniciar el servicio Ollama
+[System.Environment]::SetEnvironmentVariable("OLLAMA_NUM_PARALLEL", "4", "Machine")
+# reiniciar el servicio Ollama (o el equipo) para que tome efecto
+```
+
+Variables relevantes del lado servidor:
+
+| Variable | Qué hace |
+| --- | --- |
+| `OLLAMA_NUM_PARALLEL` | *Slots* de generación paralelos por modelo cargado (default 1). Sube la VRAM en `slots × contexto`. |
+| `OLLAMA_MAX_LOADED_MODELS` | Cuántos modelos distintos pueden estar cargados a la vez (relevante si tenés varios como acá). |
+| `OLLAMA_KEEP_ALIVE` | Cuánto tiempo queda cargado un modelo inactivo antes de descargarse (default 5m). Subirlo evita recargas frecuentes; bajarlo libera VRAM más rápido entre usos. |
+
+### Configurar el lado cliente (opengraphify)
+
+```toml
+[extraction]
+ollama_parallel = 2   # requests simultáneos que opengraphify le manda a este backend
+```
+
+Aplica tanto a la extracción semántica como al etiquetado de comunidades. Es independiente de
+`nitro` (que solo tiene sentido con OpenRouter): `nitro` acelera **cada** request eligiendo el
+proveedor más rápido; `ollama_parallel` reduce **cuántos** requests en serie hacen falta para
+un lote. Para un backend con muchos requests independientes (que es exactamente el caso de
+opengraphify: un request por chunk/lote), la concurrencia suele pesar más que la velocidad de
+un request individual — y se combinan.
 
 ---
 
