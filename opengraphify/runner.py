@@ -103,6 +103,18 @@ def _install_http_retry(config: Config) -> None:
         setattr(_llm, fname, _wrap(fn))
 
 
+def _provider_routing_extra_body(config: Config) -> dict:
+    """extra_body fragment for OpenRouter's provider routing (nitro mode).
+
+    ``sort: "throughput"`` overrides OpenRouter's default price-based load
+    balancing so it always tries the fastest provider for the model first,
+    trading cost for speed. Returns {} when config.nitro is off. Harmless to
+    send unconditionally to any backend: a literal Ollama server (or any other
+    OpenAI-compatible endpoint) just ignores an unrecognized top-level field.
+    """
+    return {"provider": {"sort": "throughput"}} if config.nitro else {}
+
+
 def _scan_counter():
     """Monkeypatch graphify.detect.classify_file to count files as they are
     scanned. Returns ``(counter, restore)`` where ``counter["n"]`` climbs during
@@ -430,17 +442,25 @@ def run(
             # extraction call and restored afterwards so community labeling later
             # keeps graphify's own num_ctx handling.
             _prev_extra = _BACKENDS["ollama"].get("extra_body")
+            _extraction_extra: dict = dict(_provider_routing_extra_body(config))
             if config.force_json:
                 _num_ctx = max(8192, config.token_budget + config.max_output_tokens + 2000)
-                _BACKENDS["ollama"]["extra_body"] = {
+                _extraction_extra.update({
                     "options": {"num_ctx": _num_ctx},
                     "keep_alive": "10m",
                     "response_format": {"type": "json_object"},
-                }
+                })
                 print(
                     f"[opengraphify] forcing JSON output (num_ctx={_num_ctx:,}, "
                     f"max_retry_depth={config.max_retry_depth})"
                 )
+            if config.nitro:
+                print(
+                    "[opengraphify] nitro: routing to the fastest OpenRouter provider "
+                    "for this model, cost over price"
+                )
+            if _extraction_extra:
+                _BACKENDS["ollama"]["extra_body"] = _extraction_extra
             try:
                 fresh = _extract_corpus_parallel(
                     uncached_pathobjs,
@@ -570,6 +590,13 @@ def run(
             # graphify's own small per-batch cap applies, then restore it after in
             # case anything later in this process still wants the extraction value.
             _prev_max_out = os.environ.pop("GRAPHIFY_MAX_OUTPUT_TOKENS", None)
+            # Labeling gets the same nitro routing hint as extraction — it's a
+            # separate BACKENDS["ollama"]["extra_body"] scope (restored below),
+            # not the one extraction just put back to _prev_extra above.
+            _prev_lbl_extra = _LBL_BACKENDS["ollama"].get("extra_body")
+            _lbl_extra = _provider_routing_extra_body(config)
+            if _lbl_extra:
+                _LBL_BACKENDS["ollama"]["extra_body"] = _lbl_extra
             try:
                 community_labels, _lbl_src = _gen_labels(
                     G, communities, backend=config.graphify_backend(), gods=gods
@@ -577,6 +604,8 @@ def run(
             finally:
                 if _prev_max_out is not None:
                     os.environ["GRAPHIFY_MAX_OUTPUT_TOKENS"] = _prev_max_out
+                if _lbl_extra:
+                    _LBL_BACKENDS["ollama"]["extra_body"] = _prev_lbl_extra
             print(
                 f"[opengraphify] community labels: {_lbl_src} "
                 f"({len(community_labels)} communities)"

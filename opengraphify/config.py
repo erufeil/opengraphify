@@ -72,6 +72,13 @@ class Config:
     # into a bounded ~3-minute failure that graphify's retry/skip handles
     # gracefully. Exported as GRAPHIFY_API_TIMEOUT (setdefault — explicit env wins).
     api_timeout: float = 180.0
+    # OpenRouter-only: adds `provider: {"sort": "throughput"}` to every request,
+    # which disables OpenRouter's default price-based load balancing in favor of
+    # whichever of the model's providers currently answers fastest. Trades cost
+    # for speed — on a cheap model this is usually a good trade, but it can cost
+    # noticeably more per token on pricier models. No effect on a literal Ollama
+    # backend (the field is simply ignored there). Off by default (opt-in).
+    nitro: bool = False
 
     def apply_env(self) -> None:
         """Set env vars consumed by graphify.llm BEFORE those modules are imported.
@@ -163,6 +170,11 @@ def load_config(root: Path, config_path: str | None = None) -> Config:
     config.model = os.environ.get("OPENGRAPHIFY_MODEL", backend.get("model", config.model))
     config.base_url = os.environ.get("OPENGRAPHIFY_BASE_URL", backend.get("base_url", config.base_url))
     config.api_key = os.environ.get("OPENGRAPHIFY_API_KEY", backend.get("api_key", config.api_key))
+    _nitro_env = os.environ.get("OPENGRAPHIFY_NITRO")
+    if _nitro_env is not None:
+        config.nitro = _nitro_env.strip().lower() not in ("0", "false", "no", "")
+    else:
+        config.nitro = bool(backend.get("nitro", config.nitro))
 
     schedule = data.get("schedule", {})
     try:
@@ -244,6 +256,7 @@ def load_config(root: Path, config_path: str | None = None) -> Config:
         f"force_json={config.force_json}  "
         f"max_retry_depth={config.max_retry_depth}  "
         f"api_timeout={config.api_timeout:g}s  "
-        f"chunk_retries={config.chunk_retries}"
+        f"chunk_retries={config.chunk_retries}  "
+        f"nitro={config.nitro}"
     )
     return config
