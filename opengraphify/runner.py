@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+import os
 import sys
 import time
 from pathlib import Path
@@ -556,9 +557,26 @@ def run(
             # Point the labeling backend at the configured endpoint/model too.
             _LBL_BACKENDS["ollama"]["base_url"] = config.base_url
             _LBL_BACKENDS["ollama"]["default_model"] = config.model
-            community_labels, _lbl_src = _gen_labels(
-                G, communities, backend=config.graphify_backend(), gods=gods
-            )
+            # graphify's _resolve_max_tokens() treats GRAPHIFY_MAX_OUTPUT_TOKENS as an
+            # unconditional override rather than a ceiling, so the huge budget we set
+            # for extraction (config.max_output_tokens — meant for large doc chunks)
+            # leaks into label_communities' own small per-batch cap (normally a few
+            # thousand, capped at 8192) and inflates it to whatever extraction uses.
+            # On a reasoning-capable model that's free to spend that whole budget on
+            # hidden thinking tokens for a trivial "name these communities" prompt,
+            # turning a few-second call into a 20+ minute one that outlasts
+            # api_timeout (the connection keeps producing bytes, so nothing ever
+            # raises to trigger a retry/skip). Unset it for the labeling call so
+            # graphify's own small per-batch cap applies, then restore it after in
+            # case anything later in this process still wants the extraction value.
+            _prev_max_out = os.environ.pop("GRAPHIFY_MAX_OUTPUT_TOKENS", None)
+            try:
+                community_labels, _lbl_src = _gen_labels(
+                    G, communities, backend=config.graphify_backend(), gods=gods
+                )
+            finally:
+                if _prev_max_out is not None:
+                    os.environ["GRAPHIFY_MAX_OUTPUT_TOKENS"] = _prev_max_out
             print(
                 f"[opengraphify] community labels: {_lbl_src} "
                 f"({len(community_labels)} communities)"
